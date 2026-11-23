@@ -908,22 +908,22 @@ struct PibGridCardView: View {
                         )
                         .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
                 }
-                .padding(.horizontal, 10)
-                .padding(.vertical, 7)
+                .padding(.horizontal, isCompact ? 8 : 10)
+                .padding(.vertical, isCompact ? 5 : 7)
                 .background(hdr.bg)
 
-                VStack(alignment: .leading, spacing: 8) {
+                VStack(alignment: .leading, spacing: isCompact ? 5 : 8) {
                     // Middle Row: Big PIB No + Date | TPS Box
                     HStack(alignment: .top, spacing: 6) {
-                        VStack(alignment: .leading, spacing: 2) {
+                        VStack(alignment: .leading, spacing: isCompact ? 1 : 2) {
                             Text(doc.noPib)
-                                .font(.system(size: 19, weight: .heavy, design: .rounded))
+                                .font(.system(size: isCompact ? 16.5 : 19, weight: .heavy, design: .rounded))
                                 .foregroundStyle(colors.textPrimary)
                                 .lineLimit(1)
                                 .minimumScaleFactor(0.8)
 
                             Text(SiapCrypto.formatDisplayDate(doc.tglPib))
-                                .font(.system(size: 11.5, weight: .medium))
+                                .font(.system(size: isCompact ? 10.5 : 11.5, weight: .medium))
                                 .foregroundStyle(colors.textSecondary)
                                 .lineLimit(1)
                         }
@@ -953,11 +953,11 @@ struct PibGridCardView: View {
 
                     // Importir Name
                     Text(doc.importir == "-" || doc.importir.isEmpty ? "IMPORTIR -" : doc.importir.uppercased())
-                        .font(.system(size: 12, weight: .semibold))
+                        .font(.system(size: isCompact ? 11 : 12, weight: .semibold))
                         .foregroundStyle(colors.textPrimary)
-                        .lineLimit(2)
+                        .lineLimit(isCompact ? 1 : 2)
                         .multilineTextAlignment(.leading)
-                        .frame(maxWidth: .infinity, minHeight: 30, alignment: .topLeading)
+                        .frame(maxWidth: .infinity, minHeight: isCompact ? 16 : 30, alignment: .topLeading)
 
                     if doc.hasAtensi {
                         HStack(spacing: 4) {
@@ -977,21 +977,21 @@ struct PibGridCardView: View {
                     if !doc.namaPfpd.isEmpty && doc.namaPfpd != "-" {
                         HStack(spacing: 6) {
                             Text(pfpdInitials)
-                                .font(.system(size: 10, weight: .heavy))
+                                .font(.system(size: isCompact ? 9 : 10, weight: .heavy))
                                 .foregroundStyle(Color(hex: 0x0B131D))
-                                .frame(width: 24, height: 24)
+                                .frame(width: isCompact ? 20 : 24, height: isCompact ? 20 : 24)
                                 .background(SiapColors.brandAmber)
                                 .clipShape(Circle())
 
                             Text(doc.namaPfpd.uppercased())
-                                .font(.system(size: 11, weight: .medium))
+                                .font(.system(size: isCompact ? 10 : 11, weight: .medium))
                                 .foregroundStyle(colors.textSecondary)
                                 .lineLimit(1)
                         }
-                        .padding(.top, 2)
+                        .padding(.top, isCompact ? 1 : 2)
                     }
                 }
-                .padding(10)
+                .padding(isCompact ? 8 : 10)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(colors.surface)
@@ -5375,19 +5375,24 @@ struct QuickCopyChip: View {
 // MARK: - Tab 5: Profil & Pengaturan (Matches Android UserScreenKt)
 
 struct UserTabView: View {
+    private enum UserSheet: String, Identifiable {
+        case printer
+        case ttdPpf
+        var id: String { rawValue }
+    }
+
     @EnvironmentObject var app: AppState
     let colors: SiapColors
 
-    @StateObject private var ttdStore = SignatureStrokeStore()
-    @State private var isUploadingTtd = false
     @State private var isTestingDiag = false
     @State private var diagResults: [(String, Bool, String)] = []
     @State private var showLogoutConfirm = false
     @State private var siap3User = UserDefaults.standard.string(forKey: "siapneo_siap3_user") ?? ""
     @State private var siap3Pass = UserDefaults.standard.string(forKey: "siapneo_siap3_pass") ?? ""
     @State private var isTestingSiap3 = false
-    @State private var showPrinterSettings = false
+    @State private var activeUserSheet: UserSheet?
     @State private var printerConfig = PrinterConnectionConfig.load()
+    @State private var ttdCacheBust = UUID().uuidString
 
     var body: some View {
         ScrollView {
@@ -5470,6 +5475,9 @@ struct UserTabView: View {
                                 .buttonStyle(.plain)
                             }
                         }
+                        Text("Mengatur ukuran & jarak kartu PIB di Beranda/Browse (Kompak Pro muat lebih banyak dokumen).")
+                            .font(.system(size: 11))
+                            .foregroundStyle(colors.textHint)
                     }
                 }
                 .padding(14)
@@ -5478,47 +5486,59 @@ struct UserTabView: View {
                 .clipShape(RoundedRectangle(cornerRadius: 15, style: .continuous))
                 .padding(.horizontal, 12)
 
-                // TTD Pemeriksa (PPF) Card
+                // TTD Pemeriksa (PPF) Card — Single Clean Preview Box + Modal Pad (Matches Android UserScreenKt)
                 VStack(alignment: .leading, spacing: 10) {
                     Text("Tanda Tangan Pemeriksa (TTD PPF)")
                         .font(.system(size: 14.5, weight: .bold))
                         .foregroundStyle(colors.textPrimary)
 
-                    if let nip = app.session?.nip, !nip.isEmpty,
-                       let url = URL(string: "\(SiapCrypto.ttdPpfAssetsBase)/\(SiapCrypto.sanitizeToken(nip)).png") {
-                        AsyncImage(url: url) { phase in
-                            if let img = phase.image {
-                                img.resizable().scaledToFit()
-                                    .frame(maxHeight: 80)
-                                    .frame(maxWidth: .infinity)
-                                    .padding(8)
-                                    .background(Color.white)
-                                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .fill(Color.white)
+                            .frame(height: 118)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                    .stroke(colors.cardBorder, lineWidth: 1)
+                            )
+
+                        if let nip = app.session?.nip, !nip.isEmpty,
+                           let url = URL(string: "\(SiapCrypto.ttdPpfAssetsBase)/\(SiapCrypto.sanitizeToken(nip)).png?v=\(ttdCacheBust)") {
+                            AsyncImage(url: url) { phase in
+                                switch phase {
+                                case .success(let img):
+                                    img.resizable().scaledToFit()
+                                        .frame(maxHeight: 98)
+                                        .padding(10)
+                                case .empty:
+                                    ProgressView().tint(SiapColors.brandNavy)
+                                case .failure:
+                                    VStack(spacing: 4) {
+                                        Image(systemName: "signature")
+                                            .font(.system(size: 24))
+                                            .foregroundStyle(Color.gray.opacity(0.6))
+                                        Text("Belum ada tanda tangan tersimpan")
+                                            .font(.system(size: 11.5, weight: .medium))
+                                            .foregroundStyle(Color.gray)
+                                    }
+                                @unknown default:
+                                    EmptyView()
+                                }
                             }
+                            .id(ttdCacheBust)
+                        } else {
+                            Text("Belum ada tanda tangan tersimpan")
+                                .font(.system(size: 11.5, weight: .medium))
+                                .foregroundStyle(Color.gray)
                         }
                     }
 
-                    SignaturePadView(store: ttdStore)
-                        .frame(height: 150)
-                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).stroke(colors.cardBorder, lineWidth: 1))
-
-                    HStack(spacing: 10) {
-                        SiapOutlinedButton("Hapus", icon: "eraser.fill", color: colors.danger) {
-                            ttdStore.clear()
-                        }
-                        .frame(width: 110)
-
-                        SiapFilledButton(
-                            isUploadingTtd ? "Mengunggah..." : "Simpan TTD PPF",
-                            icon: "signature",
-                            bg: colors.primaryAction,
-                            fg: colors.onPrimaryAction,
-                            isLoading: isUploadingTtd
-                        ) {
-                            Task { await uploadTtdPpf() }
-                        }
-                        .disabled(isUploadingTtd)
+                    SiapFilledButton(
+                        "Ubah / Buat Tanda Tangan",
+                        icon: "signature",
+                        bg: colors.primaryAction,
+                        fg: colors.onPrimaryAction
+                    ) {
+                        activeUserSheet = .ttdPpf
                     }
                 }
                 .padding(14)
@@ -5642,7 +5662,7 @@ struct UserTabView: View {
                         bg: colors.primaryAction,
                         fg: colors.onPrimaryAction
                     ) {
-                        showPrinterSettings = true
+                        activeUserSheet = .printer
                     }
                 }
                 .padding(14)
@@ -5793,37 +5813,27 @@ struct UserTabView: View {
                     .padding(.bottom, 14)
             }
         }
-        .sheet(isPresented: $showPrinterSettings, onDismiss: {
+        .sheet(item: $activeUserSheet, onDismiss: {
             printerConfig = PrinterConnectionConfig.load()
-        }) {
-            PrinterSettingsSheet(colors: colors)
+        }) { sheet in
+            switch sheet {
+            case .printer:
+                PrinterSettingsSheet(colors: colors)
+                    .environmentObject(app)
+                    .preferredColorScheme(app.themeMode.preferredColorScheme)
+            case .ttdPpf:
+                TtdPpfModalSheet(colors: colors) {
+                    ttdCacheBust = UUID().uuidString
+                }
                 .environmentObject(app)
                 .preferredColorScheme(app.themeMode.preferredColorScheme)
+            }
         }
         .alert("Keluar Akun?", isPresented: $showLogoutConfirm) {
             Button("Batal", role: .cancel) {}
             Button("Keluar", role: .destructive) { app.logout() }
         } message: {
             Text("Anda yakin ingin keluar dari akun SIAP NEO?")
-        }
-    }
-
-    private func uploadTtdPpf() async {
-        guard let nip = app.session?.nip, !nip.isEmpty else { return }
-        guard !ttdStore.strokes.isEmpty else {
-            app.showToast("Silakan tanda tangan terlebih dahulu")
-            return
-        }
-        isUploadingTtd = true
-        defer { isUploadingTtd = false }
-        let fileName = "\(SiapCrypto.sanitizeToken(nip)).png"
-        guard let pngData = ttdStore.renderImage().pngData() else { return }
-        do {
-            _ = try await SiapFtpClient.shared.upload(remoteDir: "ttd_ppf", remoteFilename: fileName, data: pngData)
-            try await SiapApiClient.shared.insertTtdPpf(nip: nip)
-            app.showToast("TTD Pemeriksa berhasil disimpan!")
-        } catch {
-            app.showToast("Gagal simpan TTD PPF: \(error.localizedDescription)")
         }
     }
 
@@ -5842,6 +5852,86 @@ struct UserTabView: View {
             res.append((name, ok, detail))
         }
         diagResults = res
+    }
+}
+
+// MARK: - TTD Pemeriksa (PPF) Modal Sheet (Matches Android UserScreenKt $showTtdModal)
+
+struct TtdPpfModalSheet: View {
+    @EnvironmentObject var app: AppState
+    @Environment(\.dismiss) private var dismiss
+    let colors: SiapColors
+    let onSaved: () -> Void
+
+    @StateObject private var ttdStore = SignatureStrokeStore()
+    @State private var isUploading = false
+
+    var body: some View {
+        NavigationStack {
+            VStack(alignment: .leading, spacing: 14) {
+                Text("Goreskan tanda tangan pemeriksa di area putih di bawah ini:")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(colors.textSecondary)
+
+                SignaturePadView(store: ttdStore)
+                    .frame(height: 240)
+                    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 14, style: .continuous)
+                            .stroke(colors.primaryAction.opacity(0.6), lineWidth: 1.5)
+                    )
+
+                HStack(spacing: 10) {
+                    SiapOutlinedButton("Hapus", icon: "eraser.fill", color: colors.danger, bg: colors.danger.opacity(0.08)) {
+                        ttdStore.clear()
+                    }
+                    .frame(width: 115)
+
+                    SiapFilledButton(
+                        isUploading ? "Mengunggah..." : "Simpan TTD PPF",
+                        icon: "checkmark.circle.fill",
+                        bg: colors.primaryAction,
+                        fg: colors.onPrimaryAction,
+                        isLoading: isUploading
+                    ) {
+                        Task { await uploadTtdPpf() }
+                    }
+                    .disabled(isUploading)
+                }
+
+                Spacer()
+            }
+            .padding(16)
+            .background(colors.backdrop.ignoresSafeArea())
+            .navigationTitle("Tanda Tangan Pemeriksa")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Button("Tutup") { dismiss() }
+                }
+            }
+        }
+    }
+
+    private func uploadTtdPpf() async {
+        guard let nip = app.session?.nip, !nip.isEmpty else { return }
+        guard !ttdStore.strokes.isEmpty else {
+            app.showToast("Silakan tanda tangan terlebih dahulu")
+            return
+        }
+        isUploading = true
+        defer { isUploading = false }
+        let fileName = "\(SiapCrypto.sanitizeToken(nip)).png"
+        guard let pngData = ttdStore.renderImage().pngData() else { return }
+        do {
+            _ = try await SiapFtpClient.shared.upload(remoteDir: "ttd_ppf", remoteFilename: fileName, data: pngData)
+            try await SiapApiClient.shared.insertTtdPpf(nip: nip)
+            app.showToast("TTD Pemeriksa berhasil disimpan!")
+            onSaved()
+            dismiss()
+        } catch {
+            app.showToast("Gagal simpan TTD PPF: \(error.localizedDescription)")
+        }
     }
 }
 
