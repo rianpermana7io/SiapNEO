@@ -1,40 +1,12 @@
 import SwiftUI
+import UIKit
 
-// MARK: - Authentic SIAP NEO Color Palette (from ColorKt.java)
+// MARK: - Upload Navigation Context
 
-enum SiapPalette {
-    static let navyDark = Color(red: 0.059, green: 0.149, blue: 0.220)        // #0F2638
-    static let navy = Color(red: 0.122, green: 0.239, blue: 0.322)            // #1F3D52
-    static let teal = Color(red: 0.114, green: 0.290, blue: 0.314)            // #1D4A50
-    static let amber = Color(red: 0.961, green: 0.620, blue: 0.043)           // #F59E0B
-    static let sky = Color(red: 0.220, green: 0.741, blue: 0.973)             // #38BDF8
-    static let danger = Color(red: 0.608, green: 0.110, blue: 0.110)          // #9B1C1C
-    static let success = Color(red: 0.086, green: 0.396, blue: 0.204)         // #166534
-
-    static var headerGradient: LinearGradient {
-        LinearGradient(
-            colors: [navyDark, navy, teal],
-            startPoint: .topLeading,
-            endPoint: .bottomTrailing
-        )
-    }
-
-    static func statusColors(for status: String) -> (bg: Color, fg: Color, accent: Color) {
-        let s = status.lowercased()
-        if s.contains("selesai") || s.contains("done") || s.contains("bap") {
-            return (Color(red: 0.05, green: 0.29, blue: 0.43).opacity(0.18), Color(red: 0.05, green: 0.45, blue: 0.68), sky)
-        }
-        if s.contains("sedang") || s.contains("proses") || s.contains("progress") {
-            return (Color(red: 0.08, green: 0.50, blue: 0.24).opacity(0.18), Color(red: 0.08, green: 0.55, blue: 0.28), Color.green)
-        }
-        if s.contains("siap") || s.contains("tolak") {
-            return (Color(red: 0.75, green: 0.14, blue: 0.14).opacity(0.16), Color(red: 0.80, green: 0.18, blue: 0.18), Color.red)
-        }
-        if s.contains("pending") || s.contains("tunda") || s.contains("hold") {
-            return (Color(red: 0.85, green: 0.55, blue: 0.05).opacity(0.18), Color(red: 0.78, green: 0.45, blue: 0.04), amber)
-        }
-        return (Color.gray.opacity(0.16), Color.secondary, Color.gray)
-    }
+struct UploadFotoContext: Equatable {
+    let pib: PibDocument
+    let nokon: String
+    let containers: [ContainerItem]
 }
 
 // MARK: - App State
@@ -47,22 +19,67 @@ final class AppState: ObservableObject {
     @Published var isLoadingPibs = false
     @Published var isLoadingLorong = false
     @Published var lastPibError: String?
+    @Published var lastUpdatedText: String = ""
     @Published var toastMessage: String?
+
+    // Navigation state (Matches Android ScreenHome / HomeSubView)
+    @Published var activeTab: SiapBottomTab = .beranda
+    @Published var selectedPib: PibDocument?
+    @Published var activeUploadContext: UploadFotoContext?
+    @Published var activeDokap: DokapTarget?
+    @Published var showManualSheet = false
+
+    // Theme & UI Density (Matches Android ThemeState)
+    @Published var themeMode: SiapThemeMode {
+        didSet { UserDefaults.standard.set(themeMode.rawValue, forKey: themeModeKey) }
+    }
+    @Published var uiDensity: SiapUiDensity {
+        didSet { UserDefaults.standard.set(uiDensity.rawValue, forKey: densityKey) }
+    }
 
     private let sessionKey = "siapneo_ios_session_v2"
     private let rememberedUserKey = "siapneo_ios_remembered_user"
+    private let themeModeKey = "siapneo_ios_theme_mode"
+    private let densityKey = "siapneo_ios_ui_density"
 
     var rememberedUsername: String {
         get { UserDefaults.standard.string(forKey: rememberedUserKey) ?? "" }
         set { UserDefaults.standard.set(newValue, forKey: rememberedUserKey) }
     }
 
+    var isCompact: Bool { uiDensity == .compactPro }
+
     init() {
+        let savedTheme = UserDefaults.standard.string(forKey: "siapneo_ios_theme_mode") ?? "system"
+        self.themeMode = SiapThemeMode(rawValue: savedTheme) ?? .system
+        let savedDensity = UserDefaults.standard.string(forKey: "siapneo_ios_ui_density") ?? "STANDARD"
+        self.uiDensity = SiapUiDensity(rawValue: savedDensity) ?? .standard
+
         if let data = UserDefaults.standard.data(forKey: sessionKey),
            let saved = try? JSONDecoder().decode(UserSession.self, from: data),
            !saved.nip.isEmpty {
             self.session = saved
         }
+    }
+
+    func navigateBack() {
+        if activeDokap != nil {
+            activeDokap = nil
+        } else if activeUploadContext != nil {
+            activeUploadContext = nil
+        } else if selectedPib != nil {
+            selectedPib = nil
+        }
+    }
+
+    func openPib(_ pib: PibDocument) {
+        activeDokap = nil
+        activeUploadContext = nil
+        selectedPib = pib
+    }
+
+    func openUpload(pib: PibDocument, nokon: String, containers: [ContainerItem]) {
+        activeUploadContext = UploadFotoContext(pib: pib, nokon: nokon, containers: containers)
     }
 
     func saveSession(_ s: UserSession) {
@@ -76,6 +93,10 @@ final class AppState: ObservableObject {
         self.session = nil
         self.pibs = []
         self.lorongItems = []
+        self.selectedPib = nil
+        self.activeUploadContext = nil
+        self.activeDokap = nil
+        self.activeTab = .beranda
         UserDefaults.standard.removeObject(forKey: sessionKey)
     }
 
@@ -94,6 +115,8 @@ final class AppState: ObservableObject {
         defer { isLoadingPibs = false }
         do {
             pibs = try await SiapApiClient.shared.fetchHomescreen(nip: nip)
+            let df = SiapCrypto.wibFormatter("HH:mm")
+            lastUpdatedText = "Diperbarui \(df.string(from: Date())) WIB"
         } catch {
             lastPibError = error.localizedDescription
             showToast("Gagal memuat PIB: \(error.localizedDescription)")
@@ -124,10 +147,12 @@ final class AppState: ObservableObject {
     }
 }
 
-// MARK: - Login View (Authentic SIAP NEO Navy-Teal Style)
+// MARK: - Login View (Authentic SIAP NEO with Official Shield Logo)
 
 struct LoginView: View {
     @EnvironmentObject var app: AppState
+    let colors: SiapColors
+
     @State private var username = ""
     @State private var password = ""
     @State private var rememberUser = true
@@ -137,120 +162,146 @@ struct LoginView: View {
 
     var body: some View {
         ZStack {
-            SiapPalette.headerGradient.ignoresSafeArea()
+            SiapColors.light.headerGradient.ignoresSafeArea()
 
             ScrollView {
-                VStack(spacing: 24) {
-                    Spacer(minLength: 44)
+                VStack(spacing: 22) {
+                    Spacer(minLength: 36)
 
                     VStack(spacing: 10) {
-                        ZStack {
-                            RoundedRectangle(cornerRadius: 22, style: .continuous)
-                                .fill(Color.white.opacity(0.14))
-                                .frame(width: 82, height: 82)
-                                .overlay(
-                                    RoundedRectangle(cornerRadius: 22, style: .continuous)
-                                        .stroke(Color.white.opacity(0.28), lineWidth: 1.5)
-                                )
-                            Text("SN")
-                                .font(.system(size: 34, weight: .heavy, design: .rounded))
-                                .foregroundStyle(.white)
-                        }
+                        Image("SiapLogo")
+                            .resizable()
+                            .scaledToFit()
+                            .frame(width: 96, height: 96)
+                            .shadow(color: Color.black.opacity(0.35), radius: 12, y: 6)
+
                         Text("SIAP NEO")
-                            .font(.system(size: 28, weight: .bold, design: .rounded))
+                            .font(.system(size: 28, weight: .heavy, design: .rounded))
                             .foregroundStyle(.white)
+
                         Text("KPU Bea dan Cukai Tipe A Tanjung Priok")
-                            .font(.subheadline)
-                            .foregroundStyle(Color.white.opacity(0.82))
-                        Text("iOS Native Edition v1.19.1")
-                            .font(.caption.weight(.semibold))
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 4)
-                            .background(SiapPalette.amber.opacity(0.22))
-                            .foregroundStyle(SiapPalette.amber)
+                            .font(.system(size: 13.5, weight: .medium))
+                            .foregroundStyle(SiapColors.hintOnNavy)
+
+                        Text("Sistem Informasi Pemeriksaan Fisik • v1.19.2")
+                            .font(.system(size: 11, weight: .bold))
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 5)
+                            .background(SiapColors.brandAmber.opacity(0.2))
+                            .foregroundStyle(SiapColors.brandAmber)
                             .clipShape(Capsule())
                     }
 
-                    VStack(alignment: .leading, spacing: 14) {
+                    VStack(alignment: .leading, spacing: 15) {
                         Text("Masuk Akun Pemeriksa")
-                            .font(.headline)
-                            .foregroundStyle(.primary)
+                            .font(.system(size: 17, weight: .bold))
+                            .foregroundStyle(colors.textPrimary)
 
                         VStack(alignment: .leading, spacing: 6) {
-                            Text("Username / Email SIAP").font(.caption).foregroundStyle(.secondary)
-                            HStack {
-                                Image(systemName: "person.fill").foregroundStyle(.secondary)
+                            Text("Username / Email SIAP")
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundStyle(colors.textSecondary)
+                            HStack(spacing: 8) {
+                                Image(systemName: "person.fill")
+                                    .foregroundStyle(colors.primaryAction)
                                 TextField("Masukkan username SIAP", text: $username)
                                     .textInputAutocapitalization(.never)
                                     .autocorrectionDisabled()
+                                    .foregroundStyle(colors.textPrimary)
+                                if !username.isEmpty {
+                                    Button { username = "" } label: {
+                                        Image(systemName: "xmark.circle.fill")
+                                            .foregroundStyle(colors.textHint)
+                                    }
+                                    .buttonStyle(.plain)
+                                }
                             }
-                            .padding(12)
-                            .background(Color(.secondarySystemBackground))
-                            .cornerRadius(12)
+                            .padding(13)
+                            .background(colors.surfaceElevated)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                    .stroke(colors.cardBorder, lineWidth: 1)
+                            )
+                            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                         }
 
                         VStack(alignment: .leading, spacing: 6) {
-                            Text("Password").font(.caption).foregroundStyle(.secondary)
-                            HStack {
-                                Image(systemName: "lock.fill").foregroundStyle(.secondary)
+                            Text("Password")
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundStyle(colors.textSecondary)
+                            HStack(spacing: 8) {
+                                Image(systemName: "lock.fill")
+                                    .foregroundStyle(colors.primaryAction)
                                 if showPassword {
                                     TextField("Masukkan password", text: $password)
                                         .textInputAutocapitalization(.never)
                                         .autocorrectionDisabled()
+                                        .foregroundStyle(colors.textPrimary)
                                 } else {
                                     SecureField("Masukkan password", text: $password)
+                                        .foregroundStyle(colors.textPrimary)
                                 }
-                                Button {
-                                    showPassword.toggle()
-                                } label: {
+                                Button { showPassword.toggle() } label: {
                                     Image(systemName: showPassword ? "eye.slash.fill" : "eye.fill")
-                                        .foregroundStyle(.secondary)
+                                        .foregroundStyle(colors.textSecondary)
                                 }
+                                .buttonStyle(.plain)
                             }
-                            .padding(12)
-                            .background(Color(.secondarySystemBackground))
-                            .cornerRadius(12)
+                            .padding(13)
+                            .background(colors.surfaceElevated)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                    .stroke(colors.cardBorder, lineWidth: 1)
+                            )
+                            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                         }
 
-                        Toggle("Ingat Username", isOn: $rememberUser)
-                            .font(.subheadline)
-                            .tint(SiapPalette.navy)
+                        Toggle(isOn: $rememberUser) {
+                            Text("Ingat Username")
+                                .font(.system(size: 13.5, weight: .medium))
+                                .foregroundStyle(colors.textPrimary)
+                        }
+                        .tint(colors.primaryAction)
 
                         if let errorMsg {
                             HStack(spacing: 8) {
                                 Image(systemName: "exclamationmark.triangle.fill")
-                                Text(errorMsg).font(.footnote)
+                                Text(errorMsg).font(.system(size: 12.5, weight: .medium))
                             }
-                            .foregroundStyle(.red)
-                            .padding(10)
+                            .foregroundStyle(colors.danger)
+                            .padding(11)
                             .frame(maxWidth: .infinity, alignment: .leading)
-                            .background(Color.red.opacity(0.12))
-                            .cornerRadius(10)
+                            .background(colors.danger.opacity(0.14))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                    .stroke(colors.danger.opacity(0.35), lineWidth: 1)
+                            )
+                            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
                         }
 
-                        Button {
+                        SiapFilledButton(
+                            isLoading ? "Menghubungkan ke SIAP..." : "Masuk",
+                            icon: isLoading ? nil : "arrow.right.circle.fill",
+                            bg: colors.primaryAction,
+                            fg: colors.onPrimaryAction,
+                            isLoading: isLoading
+                        ) {
                             Task { await performLogin() }
-                        } label: {
-                            HStack(spacing: 8) {
-                                if isLoading { ProgressView().tint(.white) }
-                                Text(isLoading ? "Menghubungkan ke SIAP..." : "Masuk")
-                                    .font(.headline)
-                            }
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 14)
-                            .background(SiapPalette.headerGradient)
-                            .foregroundStyle(.white)
-                            .cornerRadius(12)
                         }
                         .disabled(isLoading || username.trimmingCharacters(in: .whitespaces).isEmpty || password.isEmpty)
+                        .opacity(isLoading || username.trimmingCharacters(in: .whitespaces).isEmpty || password.isEmpty ? 0.55 : 1.0)
                     }
                     .padding(20)
-                    .background(Color(.systemBackground))
-                    .cornerRadius(22)
-                    .shadow(color: Color.black.opacity(0.28), radius: 20, y: 10)
-                    .padding(.horizontal, 18)
+                    .background(colors.surface)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 22, style: .continuous)
+                            .stroke(colors.cardBorder, lineWidth: 1)
+                    )
+                    .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+                    .shadow(color: Color.black.opacity(0.32), radius: 22, y: 10)
+                    .padding(.horizontal, 16)
 
-                    Spacer(minLength: 30)
+                    Spacer(minLength: 28)
                 }
             }
         }
@@ -280,14 +331,15 @@ struct LoginView: View {
     }
 }
 
-// MARK: - Tab 1: Beranda (Authentic SIAP NEO Homescreen)
+// MARK: - Tab 1: Beranda (Authentic Android HomeDashboardContent + PibGridCard)
 
-struct HomeTabView: View {
+struct HomeDashboardView: View {
     @EnvironmentObject var app: AppState
+    let colors: SiapColors
+
     @State private var searchText = ""
     @State private var filter: HomeStatusFilter = .semua
-    @State private var selectedPib: PibDocument?
-    @State private var showManualSheet = false
+    @State private var batalTarget: PibDocument?
 
     private var siapCount: Int { app.pibs.filter { $0.normalizedStatusCategory == "siap" }.count }
     private var sedangCount: Int { app.pibs.filter { $0.normalizedStatusCategory == "sedang" }.count }
@@ -298,410 +350,1690 @@ struct HomeTabView: View {
         return app.pibs.filter { doc in
             let matchFilter: Bool
             switch filter {
-            case .semua:   matchFilter = true
-            case .siap:    matchFilter = doc.normalizedStatusCategory == "siap"
-            case .sedang:  matchFilter = doc.normalizedStatusCategory == "sedang"
+            case .semua: matchFilter = true
+            case .siap: matchFilter = doc.normalizedStatusCategory == "siap"
+            case .sedang: matchFilter = doc.normalizedStatusCategory == "sedang"
             case .selesai: matchFilter = doc.normalizedStatusCategory == "selesai"
+            case .atensi: matchFilter = doc.hasAtensi
             }
             if !matchFilter { return false }
-            guard !q.isEmpty else { return true }
+            if q.isEmpty { return true }
             return doc.noPib.lowercased().contains(q)
-                || doc.kodeTiket.lowercased().contains(q)
                 || doc.importir.lowercased().contains(q)
                 || doc.kodeTps.lowercased().contains(q)
+                || doc.kodeTiket.lowercased().contains(q)
+                || doc.namaPfpd.lowercased().contains(q)
                 || doc.namaPj.lowercased().contains(q)
-                || doc.cluster.lowercased().contains(q)
         }
     }
 
     var body: some View {
-        NavigationStack {
-            ScrollView {
-                LazyVStack(spacing: 12) {
-                    heroHeaderCard
+        ScrollView {
+            LazyVStack(spacing: app.isCompact ? 9 : 12) {
+                // Officer Summary Strip (Matches Android SiapCardBrush)
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack(spacing: 10) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(app.session?.displayName ?? "Pemeriksa")
+                                .font(.system(size: 15.5, weight: .bold))
+                                .foregroundStyle(.white)
+                                .lineLimit(1)
+                            HStack(spacing: 6) {
+                                Text("NIP \(app.session?.nip ?? "-")")
+                                    .font(.system(size: 11.5, design: .monospaced))
+                                    .foregroundStyle(SiapColors.hintOnNavy)
+                                if let jab = app.session?.jabatan, !jab.isEmpty {
+                                    Text("• \(jab)")
+                                        .font(.system(size: 11))
+                                        .foregroundStyle(SiapColors.brandAmber)
+                                        .lineLimit(1)
+                                }
+                            }
+                        }
+                        Spacer()
+                    }
 
-                    // Search + Manual Button
                     HStack(spacing: 8) {
-                        HStack {
-                            Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
-                            TextField("Cari PIB, Importir, TPS, PJ...", text: $searchText)
-                                .textInputAutocapitalization(.never)
-                                .autocorrectionDisabled()
-                            if !searchText.isEmpty {
-                                Button { searchText = "" } label: {
-                                    Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
-                                }
-                            }
-                        }
-                        .padding(10)
-                        .background(Color(.secondarySystemBackground))
-                        .cornerRadius(12)
-
-                        Button {
-                            showManualSheet = true
-                        } label: {
-                            HStack(spacing: 4) {
-                                Image(systemName: "plus")
-                                Text("Manual")
-                            }
-                            .font(.subheadline.weight(.semibold))
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 10)
-                            .background(SiapPalette.navy)
-                            .foregroundStyle(.white)
-                            .cornerRadius(12)
-                        }
-                    }
-                    .padding(.horizontal, 14)
-
-                    // Status Filter Pills
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        HStack(spacing: 8) {
-                            ForEach(HomeStatusFilter.allCases) { item in
-                                let active = filter == item
-                                Button {
-                                    filter = item
-                                } label: {
-                                    Text(filterLabel(item))
-                                        .font(.caption.weight(.semibold))
-                                        .padding(.horizontal, 13)
-                                        .padding(.vertical, 7)
-                                        .background(active ? SiapPalette.navy : Color(.secondarySystemBackground))
-                                        .foregroundStyle(active ? .white : .primary)
-                                        .clipShape(Capsule())
-                                }
-                            }
-                        }
-                        .padding(.horizontal, 14)
-                    }
-
-                    // PIB List
-                    if app.isLoadingPibs && app.pibs.isEmpty {
-                        VStack(spacing: 10) {
-                            ProgressView()
-                            Text("Mengambil data PIB dari bcpriok.net...")
-                                .font(.footnote)
-                                .foregroundStyle(.secondary)
-                        }
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 44)
-                    } else if let err = app.lastPibError, app.pibs.isEmpty {
-                        VStack(spacing: 10) {
-                            Image(systemName: "wifi.exclamationmark")
-                                .font(.largeTitle)
-                                .foregroundStyle(.orange)
-                            Text(err)
-                                .font(.footnote)
-                                .multilineTextAlignment(.center)
-                                .foregroundStyle(.secondary)
-                            Button("Coba Muat Ulang") {
-                                Task { await app.loadPibs() }
-                            }
-                            .buttonStyle(.borderedProminent)
-                        }
-                        .padding(24)
-                    } else if filteredPibs.isEmpty {
-                        VStack(spacing: 8) {
-                            Image(systemName: "tray")
-                                .font(.largeTitle)
-                                .foregroundStyle(.secondary)
-                            Text(app.pibs.isEmpty ? "Belum ada tugas PIB aktif untuk NIP \(app.session?.nip ?? "-")." : "Tidak ada PIB yang cocok dengan filter.")
-                                .font(.subheadline)
-                                .foregroundStyle(.secondary)
-                                .multilineTextAlignment(.center)
-                        }
-                        .padding(36)
-                    } else {
-                        ForEach(filteredPibs) { doc in
-                            PibRichCard(doc: doc, onTap: {
-                                selectedPib = doc
-                            }, onWaPj: {
-                                app.openWhatsApp(
-                                    phone: doc.hpPj,
-                                    message: "Halo \(doc.namaPj), terkait pemeriksaan fisik PIB \(doc.noPib) (\(doc.importir)) di TPS \(doc.kodeTps). Mohon kesiapannya."
-                                )
-                            })
-                            .padding(.horizontal, 14)
-                        }
+                        HomeMetricBox(label: "Total", value: "\(app.pibs.count)", accent: .white)
+                        HomeMetricBox(label: "Siap", value: "\(siapCount)", accent: Color(hex: 0xFCA5A5))
+                        HomeMetricBox(label: "Sedang", value: "\(sedangCount)", accent: Color(hex: 0x86EFAC))
+                        HomeMetricBox(label: "Selesai", value: "\(selesaiCount)", accent: Color(hex: 0x7DD3FC))
                     }
                 }
-                .padding(.bottom, 20)
-            }
-            .background(Color(.systemGroupedBackground))
-            .refreshable {
-                await app.loadPibs()
-            }
-            .navigationBarHidden(true)
-            .sheet(item: $selectedPib) { pib in
-                PibDetailSheet(pib: pib)
-            }
-            .sheet(isPresented: $showManualSheet) {
-                ManualDocSheet()
-            }
-            .task {
-                if app.pibs.isEmpty {
-                    await app.loadPibs()
-                }
-            }
-        }
-    }
+                .padding(14)
+                .background(colors.cardGradient)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        .stroke(Color.white.opacity(0.1), lineWidth: 1)
+                )
+                .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                .padding(.horizontal, 12)
+                .padding(.top, 10)
 
-    private func filterLabel(_ f: HomeStatusFilter) -> String {
-        switch f {
-        case .semua:   return "Semua (\(app.pibs.count))"
-        case .siap:    return "Siap (\(siapCount))"
-        case .sedang:  return "Sedang (\(sedangCount))"
-        case .selesai: return "Selesai (\(selesaiCount))"
-        }
-    }
+                // Daftar PIB Header Row (Matches Android HomeDashboardContent)
+                HStack(spacing: 8) {
+                    Text("Daftar PIB")
+                        .font(.system(size: 15.5, weight: .bold))
+                        .foregroundStyle(colors.textPrimary)
 
-    private var heroHeaderCard: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack(spacing: 12) {
-                // Avatar
-                Group {
-                    if let urlStr = app.session?.photoUrl, urlStr.hasPrefix("http"), let url = URL(string: urlStr) {
-                        AsyncImage(url: url) { img in
-                            img.resizable().scaledToFill()
-                        } placeholder: {
-                            initialsAvatar
-                        }
-                    } else {
-                        initialsAvatar
-                    }
-                }
-                .frame(width: 48, height: 48)
-                .clipShape(Circle())
-                .overlay(Circle().stroke(Color.white.opacity(0.35), lineWidth: 1.5))
+                    Text("\(filteredPibs.count)")
+                        .font(.system(size: 12, weight: .heavy, design: .rounded))
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 3)
+                        .background(colors.primaryAction)
+                        .foregroundStyle(colors.onPrimaryAction)
+                        .clipShape(Capsule())
 
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(app.session?.displayName ?? "Pemeriksa")
-                        .font(.headline.bold())
-                        .foregroundStyle(.white)
-                        .lineLimit(1)
-                    Text("NIP \(app.session?.nip ?? "-")")
-                        .font(.caption.monospaced())
-                        .foregroundStyle(Color.white.opacity(0.85))
-                    if let jab = app.session?.jabatan, !jab.isEmpty {
-                        Text(jab)
-                            .font(.caption2)
-                            .foregroundStyle(SiapPalette.amber)
+                    if !app.lastUpdatedText.isEmpty {
+                        Text(app.lastUpdatedText)
+                            .font(.system(size: 11))
+                            .foregroundStyle(colors.textHint)
                             .lineLimit(1)
                     }
+
+                    Spacer()
+
+                    Button {
+                        app.showManualSheet = true
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: "plus.circle.fill")
+                            Text("Manual")
+                        }
+                        .font(.system(size: 12, weight: .bold))
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 6)
+                        .background(colors.primaryContainer)
+                        .foregroundStyle(colors.onPrimaryContainer)
+                        .clipShape(Capsule())
+                    }
+                    .buttonStyle(.plain)
                 }
-                Spacer()
+                .padding(.horizontal, 14)
 
-                Button {
-                    Task { await app.loadPibs() }
-                } label: {
-                    if app.isLoadingPibs {
-                        ProgressView().tint(.white)
-                    } else {
-                        Image(systemName: "arrow.clockwise")
-                            .font(.headline)
-                            .foregroundStyle(.white)
+                // Search Bar
+                HStack(spacing: 8) {
+                    Image(systemName: "magnifyingglass")
+                        .foregroundStyle(colors.textHint)
+                    TextField("Cari No PIB, Importir, TPS, PFPD, PJ...", text: $searchText)
+                        .font(.system(size: 13.5))
+                        .foregroundStyle(colors.textPrimary)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                    if !searchText.isEmpty {
+                        Button { searchText = "" } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .foregroundStyle(colors.textHint)
+                        }
+                        .buttonStyle(.plain)
                     }
                 }
-                .frame(width: 38, height: 38)
-                .background(Color.white.opacity(0.16))
-                .clipShape(Circle())
-            }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 10)
+                .background(colors.surface)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .stroke(colors.cardBorder, lineWidth: 1)
+                )
+                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .padding(.horizontal, 12)
 
-            // 4 KPI Mini Cards
-            HStack(spacing: 8) {
-                kpiBox(title: "Total", value: "\(app.pibs.count)", tint: .white)
-                kpiBox(title: "Siap", value: "\(siapCount)", tint: Color(red: 1.0, green: 0.65, blue: 0.65))
-                kpiBox(title: "Sedang", value: "\(sedangCount)", tint: Color(red: 0.43, green: 0.91, blue: 0.72))
-                kpiBox(title: "Selesai", value: "\(selesaiCount)", tint: SiapPalette.sky)
-            }
-        }
-        .padding(.horizontal, 16)
-        .padding(.top, 14)
-        .padding(.bottom, 16)
-        .background(SiapPalette.headerGradient)
-        .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
-        .padding(.horizontal, 12)
-        .padding(.top, 6)
-    }
-
-    private var initialsAvatar: some View {
-        ZStack {
-            Color.white.opacity(0.2)
-            Text(String((app.session?.displayName ?? "S").prefix(2)).uppercased())
-                .font(.headline.bold())
-                .foregroundStyle(.white)
-        }
-    }
-
-    private func kpiBox(title: String, value: String, tint: Color) -> some View {
-        VStack(spacing: 2) {
-            Text(value)
-                .font(.title3.bold().monospacedDigit())
-                .foregroundStyle(tint)
-            Text(title)
-                .font(.caption2)
-                .foregroundStyle(Color.white.opacity(0.78))
-        }
-        .frame(maxWidth: .infinity)
-        .padding(.vertical, 8)
-        .background(Color.white.opacity(0.11))
-        .cornerRadius(12)
-    }
-}
-
-// MARK: - Rich SIAP NEO PIB Card
-
-struct PibRichCard: View {
-    let doc: PibDocument
-    let onTap: () -> Void
-    let onWaPj: () -> Void
-
-    var body: some View {
-        let stColor = SiapPalette.statusColors(for: doc.status)
-
-        Button(action: onTap) {
-            HStack(spacing: 0) {
-                Rectangle()
-                    .fill(stColor.accent)
-                    .frame(width: 5)
-
-                VStack(alignment: .leading, spacing: 8) {
-                    // Row 1: PIB + Date + Status
-                    HStack(alignment: .top) {
-                        VStack(alignment: .leading, spacing: 2) {
-                            HStack(spacing: 6) {
-                                Text("PIB \(doc.noPib)")
-                                    .font(.headline.bold())
-                                    .foregroundStyle(.primary)
-                                if !doc.jenisKontainer.isEmpty && doc.jenisKontainer != "-" {
-                                    Text(doc.jenisKontainer)
-                                        .font(.caption2.bold())
-                                        .padding(.horizontal, 6)
-                                        .padding(.vertical, 2)
-                                        .background(SiapPalette.navy.opacity(0.14))
-                                        .foregroundStyle(SiapPalette.navy)
-                                        .cornerRadius(5)
-                                }
-                            }
-                            Text("Tgl \(SiapCrypto.formatDisplayDate(doc.tglPib)) • Tiket \(doc.kodeTiket)")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                        Spacer()
-                        Text(doc.status)
-                            .font(.caption2.bold())
-                            .padding(.horizontal, 9)
-                            .padding(.vertical, 4)
-                            .background(stColor.bg)
-                            .foregroundStyle(stColor.fg)
-                            .clipShape(Capsule())
-                    }
-
-                    // Row 2: Importir
-                    if !doc.importir.isEmpty && doc.importir != "-" {
-                        Text(doc.importir)
-                            .font(.subheadline.weight(.semibold))
-                            .foregroundStyle(.primary)
-                            .multilineTextAlignment(.leading)
-                    }
-
-                    // Row 3: TPS / Cluster / Persentase / Item
-                    HStack(spacing: 8) {
-                        if doc.kodeTps != "-" {
-                            miniChip(icon: "building.2.fill", text: doc.kodeTps)
-                        }
-                        if doc.persentasePeriksa != "-" {
-                            miniChip(icon: "percent", text: doc.persentasePeriksa)
-                        }
-                        if doc.jumlahItem != "-" {
-                            miniChip(icon: "shippingbox.fill", text: "\(doc.jumlahItem) item")
-                        }
-                        if doc.cluster != "-" {
-                            miniChip(icon: "square.grid.2x2.fill", text: doc.cluster)
-                        }
-                    }
-
-                    // Row 4: Atensi highlight
-                    if doc.hasAtensi {
-                        HStack(alignment: .top, spacing: 6) {
-                            Image(systemName: "exclamationmark.triangle.fill")
-                                .font(.caption)
-                                .foregroundStyle(.orange)
-                            Text("Atensi: \(doc.atensi)")
-                                .font(.caption)
-                                .foregroundStyle(.primary)
-                                .lineLimit(2)
-                        }
-                        .padding(8)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(Color.orange.opacity(0.12))
-                        .cornerRadius(8)
-                    }
-
-                    // Row 5: PJ + BAP + Quick WA
-                    HStack {
-                        if doc.namaPj != "-" {
-                            Label(doc.namaPj, systemImage: "person.badge.shield.checkmark")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                                .lineLimit(1)
-                        } else if doc.namaPfpd != "-" {
-                            Label("PFPD: \(doc.namaPfpd)", systemImage: "person.text.rectangle")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                                .lineLimit(1)
-                        }
-                        Spacer()
-                        if !doc.nomorBap.isEmpty && doc.nomorBap != "-" {
-                            Text("BAP: \(doc.nomorBap)")
-                                .font(.caption2.bold())
-                                .foregroundStyle(SiapPalette.sky)
-                        }
-                        if !doc.hpPj.isEmpty && doc.hpPj != "not found" && doc.hpPj != "-" {
-                            Button(action: onWaPj) {
-                                Label("WA PJ", systemImage: "message.fill")
-                                    .font(.caption2.bold())
-                                    .padding(.horizontal, 8)
-                                    .padding(.vertical, 4)
-                                    .background(Color.green.opacity(0.16))
-                                    .foregroundStyle(.green)
+                // Status Filter Chips
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 7) {
+                        ForEach(HomeStatusFilter.allCases) { item in
+                            let active = filter == item
+                            Button { filter = item } label: {
+                                Text(filterChipTitle(item))
+                                    .font(.system(size: 12, weight: .bold))
+                                    .padding(.horizontal, 12)
+                                    .padding(.vertical, 7)
+                                    .background(active ? colors.primaryAction : colors.surface)
+                                    .foregroundStyle(active ? colors.onPrimaryAction : colors.textSecondary)
+                                    .overlay(
+                                        Capsule().stroke(active ? Color.clear : colors.cardBorder, lineWidth: 1)
+                                    )
                                     .clipShape(Capsule())
                             }
                             .buttonStyle(.plain)
                         }
                     }
+                    .padding(.horizontal, 12)
                 }
-                .padding(12)
+
+                // Content List
+                if app.isLoadingPibs && app.pibs.isEmpty {
+                    VStack(spacing: 12) {
+                        ProgressView().tint(colors.primaryAction).scaleEffect(1.1)
+                        Text("Memuat daftar PIB dari server SIAP...")
+                            .font(.system(size: 13.5, weight: .medium))
+                            .foregroundStyle(colors.textSecondary)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 48)
+                } else if filteredPibs.isEmpty {
+                    VStack(spacing: 12) {
+                        Image(systemName: "tray")
+                            .font(.system(size: 38))
+                            .foregroundStyle(colors.textHint)
+                        Text(app.pibs.isEmpty ? "Belum ada penugasan PIB aktif" : "Tidak ada PIB cocok dengan filter")
+                            .font(.system(size: 15, weight: .bold))
+                            .foregroundStyle(colors.textPrimary)
+                        if let err = app.lastPibError {
+                            Text(err)
+                                .font(.system(size: 12))
+                                .foregroundStyle(colors.danger)
+                                .multilineTextAlignment(.center)
+                        }
+                        SiapOutlinedButton("Muat Ulang Beranda", icon: "arrow.clockwise", color: colors.primaryAction) {
+                            Task { await app.loadPibs() }
+                        }
+                        .frame(maxWidth: 210)
+                    }
+                    .padding(24)
+                    .frame(maxWidth: .infinity)
+                    .background(colors.surface)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 16, style: .continuous)
+                            .stroke(colors.cardBorder, lineWidth: 1)
+                    )
+                    .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                    .padding(.horizontal, 12)
+                } else {
+                    ForEach(filteredPibs) { doc in
+                        PibGridCardView(
+                            doc: doc,
+                            colors: colors,
+                            isCompact: app.isCompact,
+                            onTap: { app.openPib(doc) },
+                            onWhatsAppPfpd: {
+                                app.openWhatsApp(
+                                    phone: doc.noHpPfpd,
+                                    message: "Yth. \(doc.namaPfpd), konfirmasi pemeriksaan fisik PIB \(doc.noPib) (\(doc.importir))."
+                                )
+                            },
+                            onWhatsAppPj: {
+                                app.openWhatsApp(
+                                    phone: doc.hpPj,
+                                    message: "Selamat pagi/siang \(doc.namaPj), mohon kesiapan pemeriksaan fisik PIB \(doc.noPib) (\(doc.importir)) di TPS \(doc.kodeTps)."
+                                )
+                            },
+                            onBatal: { batalTarget = doc }
+                        )
+                        .padding(.horizontal, 12)
+                    }
+                }
             }
-            .background(Color(.systemBackground))
-            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-            .shadow(color: Color.black.opacity(0.06), radius: 6, y: 2)
+            .padding(.bottom, 18)
         }
-        .buttonStyle(.plain)
+        .refreshable {
+            await app.loadPibs()
+        }
+        .task {
+            if app.pibs.isEmpty && app.session != nil {
+                await app.loadPibs()
+            }
+        }
+        .alert("Batalkan Pemeriksaan PIB?", isPresented: Binding(
+            get: { batalTarget != nil },
+            set: { if !$0 { batalTarget = nil } }
+        )) {
+            Button("Batal", role: .cancel) { batalTarget = nil }
+            Button("Ya, Batalkan", role: .destructive) {
+                if let target = batalTarget {
+                    Task {
+                        do {
+                            try await SiapApiClient.shared.updateBatalPeriksa(kodeTiket: target.kodeTiket)
+                            app.showToast("PIB \(target.noPib) dibatalkan")
+                            await app.loadPibs()
+                        } catch {
+                            app.showToast("Gagal batal: \(error.localizedDescription)")
+                        }
+                        batalTarget = nil
+                    }
+                }
+            }
+        } message: {
+            Text("Batalkan pemeriksaan untuk PIB No. \(batalTarget?.noPib ?? "")?")
+        }
     }
 
-    private func miniChip(icon: String, text: String) -> some View {
-        HStack(spacing: 3) {
-            Image(systemName: icon).font(.caption2)
-            Text(text).font(.caption2.weight(.medium)).lineLimit(1)
+    private func filterChipTitle(_ item: HomeStatusFilter) -> String {
+        switch item {
+        case .semua: return "Semua (\(app.pibs.count))"
+        case .siap: return "Siap (\(siapCount))"
+        case .sedang: return "Sedang (\(sedangCount))"
+        case .selesai: return "Selesai (\(selesaiCount))"
+        case .atensi: return "Atensi (\(app.pibs.filter(\.hasAtensi).count))"
         }
-        .padding(.horizontal, 7)
-        .padding(.vertical, 3)
-        .background(Color(.secondarySystemBackground))
-        .foregroundStyle(.secondary)
-        .cornerRadius(6)
     }
 }
 
-// MARK: - Tab 2: Instruksi Lorong (detailkontainer_nip)
+struct HomeMetricBox: View {
+    let label: String
+    let value: String
+    let accent: Color
+
+    var body: some View {
+        VStack(spacing: 2) {
+            Text(value)
+                .font(.system(size: 18, weight: .heavy, design: .rounded))
+                .foregroundStyle(accent)
+            Text(label)
+                .font(.system(size: 10.5, weight: .semibold))
+                .foregroundStyle(Color.white.opacity(0.75))
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 8)
+        .background(Color.white.opacity(0.08))
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+    }
+}
+
+// MARK: - Authentic Android PibGridCard
+
+struct PibGridCardView: View {
+    let doc: PibDocument
+    let colors: SiapColors
+    let isCompact: Bool
+    let onTap: () -> Void
+    let onWhatsAppPfpd: () -> Void
+    let onWhatsAppPj: () -> Void
+    let onBatal: () -> Void
+
+    var body: some View {
+        let st = colors.statusBadgeStyle(for: doc.status)
+
+        Button(action: onTap) {
+            HStack(spacing: 0) {
+                Rectangle()
+                    .fill(st.accent)
+                    .frame(width: 4.5)
+
+                VStack(alignment: .leading, spacing: isCompact ? 6 : 9) {
+                    // Row 1: PIB No + Date + Status Badge
+                    HStack(alignment: .top, spacing: 8) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            HStack(spacing: 6) {
+                                Text("PIB \(doc.noPib)")
+                                    .font(.system(size: isCompact ? 15 : 16.5, weight: .heavy, design: .rounded))
+                                    .foregroundStyle(colors.textPrimary)
+
+                                if !doc.jenisKontainer.isEmpty && doc.jenisKontainer != "-" {
+                                    Text(doc.isLclDefault ? "LCL" : "FCL")
+                                        .font(.system(size: 10, weight: .heavy))
+                                        .padding(.horizontal, 6)
+                                        .padding(.vertical, 2)
+                                        .background(colors.primaryContainer)
+                                        .foregroundStyle(colors.onPrimaryContainer)
+                                        .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+                                }
+
+                                if !doc.barcon.isEmpty && doc.barcon != "-" && doc.barcon != "0" {
+                                    Text("BARCON")
+                                        .font(.system(size: 9.5, weight: .heavy))
+                                        .padding(.horizontal, 6)
+                                        .padding(.vertical, 2)
+                                        .background(colors.warningBoxBg)
+                                        .foregroundStyle(colors.warningBoxText)
+                                        .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+                                }
+                            }
+                            Text(SiapCrypto.formatDisplayDate(doc.tglPib))
+                                .font(.system(size: 11.5, weight: .medium))
+                                .foregroundStyle(colors.textHint)
+                        }
+
+                        Spacer(minLength: 4)
+                        SiapStatusChip(text: doc.status, colors: colors)
+                    }
+
+                    // Row 2: Importir
+                    Text(doc.importir)
+                        .font(.system(size: isCompact ? 13 : 14, weight: .bold))
+                        .foregroundStyle(colors.textPrimary)
+                        .lineLimit(2)
+                        .multilineTextAlignment(.leading)
+
+                    // Row 3: Meta pills (TPS, Persen, Item, IP)
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 6) {
+                            if !doc.kodeTps.isEmpty && doc.kodeTps != "-" {
+                                SiapMetaTag(icon: "building.2.fill", text: "TPS \(doc.kodeTps)", bg: colors.surfaceElevated, fg: colors.textSecondary)
+                            }
+                            if !doc.persentasePeriksa.isEmpty && doc.persentasePeriksa != "-" {
+                                SiapMetaTag(icon: "percent", text: doc.persentasePeriksa, bg: colors.surfaceElevated, fg: colors.secondary)
+                            }
+                            if !doc.jumlahItem.isEmpty && doc.jumlahItem != "-" {
+                                SiapMetaTag(icon: "shippingbox", text: "\(doc.jumlahItem) Item", bg: colors.surfaceElevated, fg: colors.textSecondary)
+                            }
+                            if !doc.ipCeisa.isEmpty && doc.ipCeisa != "-" {
+                                SiapMetaTag(icon: "doc.plaintext", text: "IP \(doc.ipCeisa)", bg: colors.surfaceElevated, fg: colors.textHint)
+                            }
+                        }
+                    }
+
+                    // Row 4: Atensi PFPD Warning Box
+                    if doc.hasAtensi {
+                        HStack(alignment: .top, spacing: 7) {
+                            Image(systemName: "exclamationmark.triangle.fill")
+                                .font(.system(size: 12))
+                                .foregroundStyle(colors.warningBoxText)
+                                .padding(.top, 1)
+                            Text("Atensi: \(doc.atensi)")
+                                .font(.system(size: 11.5, weight: .semibold))
+                                .foregroundStyle(colors.warningBoxText)
+                                .lineLimit(2)
+                                .multilineTextAlignment(.leading)
+                        }
+                        .padding(.horizontal, 9)
+                        .padding(.vertical, 7)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(colors.warningBoxBg)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .stroke(colors.warningBoxBorder.opacity(0.55), lineWidth: 1)
+                        )
+                        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    }
+
+                    // Row 5: PFPD / PJ Split + Quick Actions (Matches PfpdPjSplit)
+                    Divider().overlay(colors.divider)
+
+                    HStack(spacing: 8) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            if !doc.namaPfpd.isEmpty && doc.namaPfpd != "-" {
+                                Text("PFPD: \(doc.namaPfpd)")
+                                    .font(.system(size: 11, weight: .medium))
+                                    .foregroundStyle(colors.textSecondary)
+                                    .lineLimit(1)
+                            }
+                            if !doc.namaPj.isEmpty && doc.namaPj != "-" {
+                                Text("PJ: \(doc.namaPj)")
+                                    .font(.system(size: 11, weight: .medium))
+                                    .foregroundStyle(colors.textSecondary)
+                                    .lineLimit(1)
+                            }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+
+                        if !doc.noHpPfpd.isEmpty && doc.noHpPfpd != "-" {
+                            Button(action: onWhatsAppPfpd) {
+                                HStack(spacing: 3) {
+                                    Image(systemName: "message.fill")
+                                    Text("PFPD")
+                                }
+                                .font(.system(size: 10.5, weight: .bold))
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 5)
+                                .background(colors.success.opacity(0.15))
+                                .foregroundStyle(colors.success)
+                                .clipShape(Capsule())
+                            }
+                            .buttonStyle(.plain)
+                        }
+
+                        if !doc.hpPj.isEmpty && doc.hpPj != "-" {
+                            Button(action: onWhatsAppPj) {
+                                HStack(spacing: 3) {
+                                    Image(systemName: "message.fill")
+                                    Text("PJ")
+                                }
+                                .font(.system(size: 10.5, weight: .bold))
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 5)
+                                .background(colors.success.opacity(0.15))
+                                .foregroundStyle(colors.success)
+                                .clipShape(Capsule())
+                            }
+                            .buttonStyle(.plain)
+                        }
+
+                        Button(action: onBatal) {
+                            Image(systemName: "xmark.circle")
+                                .font(.system(size: 16, weight: .semibold))
+                                .foregroundStyle(colors.danger.opacity(0.85))
+                                .padding(4)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(isCompact ? 11 : 13)
+            }
+            .background(colors.surface)
+            .overlay(
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .stroke(colors.cardBorder, lineWidth: 1)
+            )
+            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .shadow(color: Color.black.opacity(colors.isDark ? 0.22 : 0.05), radius: 5, y: 2)
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+// MARK: - Full-Screen Drill-Down: HeaderPibFclPanel + PibDocumentBottomActionBar
+
+struct HeaderPibFclPanel: View {
+    @EnvironmentObject var app: AppState
+    let pib: PibDocument
+    let colors: SiapColors
+
+    @State private var isRincianExpanded = true
+    @State private var containers: [ContainerItem] = []
+    @State private var isLoadingContainers = false
+    @State private var dokapLinks: [String: String] = [:]
+    @State private var manualContainer = ""
+    @State private var showAddContainer = false
+    @State private var showTtdSheet = false
+    @State private var showSelesaiConfirm = false
+    @State private var showBatalConfirm = false
+    @State private var isSubmittingAction = false
+
+    private var modeLabel: String { pib.isLclDefault ? "LCL" : "FCL" }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            ScrollView {
+                VStack(spacing: 12) {
+                    // Collapsible Card: RINCIAN DOKUMEN PIB (FCL/LCL)
+                    VStack(spacing: 0) {
+                        Button {
+                            withAnimation(.easeInOut(duration: 0.2)) {
+                                isRincianExpanded.toggle()
+                            }
+                        } label: {
+                            HStack(spacing: 8) {
+                                Image(systemName: "doc.text.fill")
+                                    .foregroundStyle(SiapColors.brandAmber)
+                                Text("RINCIAN DOKUMEN PIB (\(modeLabel))")
+                                    .font(.system(size: 13, weight: .heavy, design: .rounded))
+                                    .foregroundStyle(.white)
+                                Spacer()
+                                SiapStatusChip(text: pib.status, colors: colors)
+                                Image(systemName: isRincianExpanded ? "chevron.up" : "chevron.down")
+                                    .font(.system(size: 12, weight: .bold))
+                                    .foregroundStyle(SiapColors.hintOnNavy)
+                            }
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 12)
+                            .background(colors.cardGradient)
+                        }
+                        .buttonStyle(.plain)
+
+                        if isRincianExpanded {
+                            VStack(spacing: 8) {
+                                SiapMetaRow(label: "No. / Tanggal PIB", value: "\(pib.noPib) / \(SiapCrypto.formatDisplayDate(pib.tglPib))", colors: colors)
+                                SiapMetaRow(label: "Importir", value: pib.importir, colors: colors)
+                                SiapMetaRow(label: "Lokasi TPS", value: pib.kodeTps, colors: colors)
+                                SiapMetaRow(label: "Kode Tiket", value: pib.kodeTiket, colors: colors)
+                                SiapMetaRow(label: "IP CEISA", value: pib.ipCeisa, colors: colors)
+                                SiapMetaRow(label: "Jenis / Persen", value: "\(pib.jenisKontainer) • \(pib.persentasePeriksa)", colors: colors)
+                                SiapMetaRow(label: "Jumlah Item", value: pib.jumlahItem, colors: colors)
+                                if !pib.barcon.isEmpty && pib.barcon != "-" {
+                                    SiapMetaRow(label: "Barang Contoh", value: pib.barcon, colors: colors)
+                                }
+                                if !pib.nomorBap.isEmpty && pib.nomorBap != "-" {
+                                    SiapMetaRow(label: "Nomor BAP", value: "\(pib.nomorBap) (\(SiapCrypto.formatDisplayDate(pib.tglBap)))", colors: colors)
+                                }
+                                if !pib.pendampingan.isEmpty && pib.pendampingan != "-" {
+                                    SiapMetaRow(label: "Pendampingan", value: "\(pib.pendampingan) \(pib.namaPendamping)", colors: colors)
+                                }
+
+                                // PFPD & PJ with direct WA buttons
+                                Divider().overlay(colors.divider)
+
+                                HStack(spacing: 8) {
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text("Nama PFPD").font(.system(size: 11)).foregroundStyle(colors.textHint)
+                                        Text(pib.namaPfpd).font(.system(size: 13, weight: .semibold)).foregroundStyle(colors.textPrimary)
+                                    }
+                                    Spacer()
+                                    if !pib.noHpPfpd.isEmpty && pib.noHpPfpd != "-" {
+                                        Button {
+                                            app.openWhatsApp(phone: pib.noHpPfpd, message: "Yth. \(pib.namaPfpd), update pemeriksaan PIB \(pib.noPib) (\(pib.importir)).")
+                                        } label: {
+                                            HStack(spacing: 4) {
+                                                Image(systemName: "message.fill")
+                                                Text("WA PFPD")
+                                            }
+                                            .font(.system(size: 11.5, weight: .bold))
+                                            .padding(.horizontal, 10)
+                                            .padding(.vertical, 6)
+                                            .background(colors.success.opacity(0.16))
+                                            .foregroundStyle(colors.success)
+                                            .clipShape(Capsule())
+                                        }
+                                        .buttonStyle(.plain)
+                                    }
+                                }
+
+                                HStack(spacing: 8) {
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text("Pengurus / PJ").font(.system(size: 11)).foregroundStyle(colors.textHint)
+                                        Text(pib.namaPj).font(.system(size: 13, weight: .semibold)).foregroundStyle(colors.textPrimary)
+                                    }
+                                    Spacer()
+                                    if !pib.hpPj.isEmpty && pib.hpPj != "-" {
+                                        Button {
+                                            app.openWhatsApp(phone: pib.hpPj, message: "Halo \(pib.namaPj), mohon kesiapan pemeriksaan fisik PIB \(pib.noPib) di TPS \(pib.kodeTps).")
+                                        } label: {
+                                            HStack(spacing: 4) {
+                                                Image(systemName: "message.fill")
+                                                Text("WA PJ")
+                                            }
+                                            .font(.system(size: 11.5, weight: .bold))
+                                            .padding(.horizontal, 10)
+                                            .padding(.vertical, 6)
+                                            .background(colors.success.opacity(0.16))
+                                            .foregroundStyle(colors.success)
+                                            .clipShape(Capsule())
+                                        }
+                                        .buttonStyle(.plain)
+                                    }
+                                }
+
+                                if pib.hasAtensi {
+                                    HStack(alignment: .top, spacing: 8) {
+                                        Image(systemName: "exclamationmark.triangle.fill")
+                                            .foregroundStyle(colors.warningBoxText)
+                                        VStack(alignment: .leading, spacing: 2) {
+                                            Text("ATENSI PFPD")
+                                                .font(.system(size: 10.5, weight: .heavy))
+                                                .foregroundStyle(colors.warningBoxText)
+                                            Text(pib.atensi)
+                                                .font(.system(size: 12.5, weight: .semibold))
+                                                .foregroundStyle(colors.warningBoxText)
+                                        }
+                                    }
+                                    .padding(10)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .background(colors.warningBoxBg)
+                                    .overlay(
+                                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                            .stroke(colors.warningBoxBorder.opacity(0.6), lineWidth: 1)
+                                    )
+                                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                                }
+                            }
+                            .padding(14)
+                            .background(colors.surface)
+                        }
+                    }
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 15, style: .continuous)
+                            .stroke(colors.cardBorder, lineWidth: 1)
+                    )
+                    .clipShape(RoundedRectangle(cornerRadius: 15, style: .continuous))
+                    .padding(.horizontal, 12)
+                    .padding(.top, 10)
+
+                    // Container List Section (Matches Daftar Kontainer (N))
+                    VStack(alignment: .leading, spacing: 10) {
+                        HStack {
+                            Text("Daftar Kontainer (\(containers.count))")
+                                .font(.system(size: 15, weight: .bold))
+                                .foregroundStyle(colors.textPrimary)
+                            Spacer()
+                            Button {
+                                showAddContainer.toggle()
+                            } label: {
+                                HStack(spacing: 4) {
+                                    Image(systemName: "plus.circle.fill")
+                                    Text("Input")
+                                }
+                                .font(.system(size: 12, weight: .bold))
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 5)
+                                .background(colors.primaryContainer)
+                                .foregroundStyle(colors.onPrimaryContainer)
+                                .clipShape(Capsule())
+                            }
+                            .buttonStyle(.plain)
+
+                            Button {
+                                Task { await loadDetails() }
+                            } label: {
+                                Image(systemName: "arrow.clockwise")
+                                    .font(.system(size: 14, weight: .bold))
+                                    .foregroundStyle(colors.primaryAction)
+                                    .padding(6)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                        .padding(.horizontal, 14)
+
+                        if showAddContainer {
+                            HStack(spacing: 8) {
+                                TextField("Contoh: TCKU1234567 atau LCL", text: $manualContainer)
+                                    .textInputAutocapitalization(.characters)
+                                    .autocorrectionDisabled()
+                                    .font(.system(size: 13.5, design: .monospaced))
+                                    .foregroundStyle(colors.textPrimary)
+                                    .padding(11)
+                                    .background(colors.surfaceElevated)
+                                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+
+                                Button {
+                                    let tok = manualContainer.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+                                    guard !tok.isEmpty else { return }
+                                    app.openUpload(pib: pib, nokon: tok, containers: containers)
+                                    manualContainer = ""
+                                    showAddContainer = false
+                                } label: {
+                                    Text("Buka")
+                                        .font(.system(size: 13, weight: .bold))
+                                        .padding(.horizontal, 14)
+                                        .padding(.vertical, 11)
+                                        .background(colors.primaryAction)
+                                        .foregroundStyle(colors.onPrimaryAction)
+                                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                                }
+                                .buttonStyle(.plain)
+                            }
+                            .padding(.horizontal, 12)
+                        }
+
+                        if isLoadingContainers {
+                            HStack(spacing: 10) {
+                                ProgressView().tint(colors.primaryAction)
+                                Text("Memuat daftar kontainer...")
+                                    .font(.system(size: 13))
+                                    .foregroundStyle(colors.textSecondary)
+                            }
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 24)
+                        } else if containers.isEmpty {
+                            VStack(spacing: 10) {
+                                Text("Belum ada kontainer terdaftar (atau dokumen LCL).")
+                                    .font(.system(size: 13))
+                                    .foregroundStyle(colors.textSecondary)
+                                SiapFilledButton(
+                                    "Upload Foto Pemeriksaan (\(modeLabel))",
+                                    icon: "camera.fill",
+                                    bg: colors.primaryAction,
+                                    fg: colors.onPrimaryAction
+                                ) {
+                                    app.openUpload(pib: pib, nokon: pib.isLclDefault ? "LCL" : "KONTAINER", containers: containers)
+                                }
+                                .frame(maxWidth: 280)
+                            }
+                            .padding(16)
+                            .frame(maxWidth: .infinity)
+                            .background(colors.surface)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                    .stroke(colors.cardBorder, lineWidth: 1)
+                            )
+                            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                            .padding(.horizontal, 12)
+                        } else {
+                            ForEach(containers) { c in
+                                ContainerCardRow(container: c, colors: colors) {
+                                    app.openUpload(pib: pib, nokon: c.noContainer, containers: containers)
+                                }
+                                .padding(.horizontal, 12)
+                            }
+                        }
+                    }
+                }
+                .padding(.bottom, 20)
+            }
+
+            // Sticky Bottom Action Bar (Exact port of Android PibDocumentBottomActionBar!)
+            VStack(spacing: 8) {
+                // Row 1: Dokap Quick Pills (PIB | INV/PL | B/L | BAP)
+                HStack(spacing: 6) {
+                    DokapPillButton(title: "PIB", icon: "doc.text.fill", available: findDokapUrl(keys: ["pib", "file_pib", "url_pib"]) != nil, colors: colors) {
+                        openDokap(title: "Dokumen PIB \(pib.noPib)", keys: ["pib", "file_pib", "url_pib"])
+                    }
+                    DokapPillButton(title: "INV/PL", icon: "list.bullet.rectangle", available: findDokapUrl(keys: ["pl", "inv", "packing", "invoice"]) != nil, colors: colors) {
+                        openDokap(title: "INV / PL • \(pib.noPib)", keys: ["pl", "inv", "packing", "invoice"])
+                    }
+                    DokapPillButton(title: "B/L", icon: "ferry.fill", available: findDokapUrl(keys: ["bl", "awb", "bill"]) != nil, colors: colors) {
+                        openDokap(title: "B/L • \(pib.noPib)", keys: ["bl", "awb", "bill"])
+                    }
+                    DokapPillButton(title: "BAP", icon: "checkmark.seal.fill", available: findDokapUrl(keys: ["bap", "cetak_bap"]) != nil, colors: colors) {
+                        openDokap(title: "BAP • \(pib.noPib)", keys: ["bap", "cetak_bap"])
+                    }
+                }
+
+                // Row 2: TTD PJ | Selesai Periksa | Batal
+                HStack(spacing: 8) {
+                    SiapOutlinedButton("TTD PJ", icon: "signature", color: colors.secondary, bg: colors.surfaceElevated) {
+                        showTtdSheet = true
+                    }
+                    .frame(width: 104)
+
+                    SiapFilledButton(
+                        "Selesai Periksa",
+                        icon: "checkmark.seal.fill",
+                        bg: colors.success,
+                        fg: colors.isDark ? Color(hex: 0x052E16) : .white,
+                        isLoading: isSubmittingAction
+                    ) {
+                        showSelesaiConfirm = true
+                    }
+
+                    Button {
+                        showBatalConfirm = true
+                    } label: {
+                        Image(systemName: "xmark.octagon.fill")
+                            .font(.system(size: 18, weight: .bold))
+                            .foregroundStyle(colors.danger)
+                            .frame(width: 44, height: 44)
+                            .background(colors.danger.opacity(0.14))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                    .stroke(colors.danger.opacity(0.5), lineWidth: 1.2)
+                            )
+                            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.top, 10)
+            .padding(.bottom, 8)
+            .background(
+                colors.surface
+                    .ignoresSafeArea(edges: .bottom)
+            )
+            .overlay(alignment: .top) {
+                Rectangle().fill(colors.divider).frame(height: 0.75)
+            }
+        }
+        .task(id: pib.kodeTiket) {
+            await loadDetails()
+        }
+        .sheet(isPresented: $showTtdSheet) {
+            TtdPjModalSheet(pib: pib, colors: colors)
+                .environmentObject(app)
+                .preferredColorScheme(app.themeMode.preferredColorScheme)
+        }
+        .alert("Konfirmasi Selesai Pemeriksaan", isPresented: $showSelesaiConfirm) {
+            Button("Batal", role: .cancel) {}
+            Button("Ya, Selesai") {
+                Task { await submitSelesai() }
+            }
+        } message: {
+            Text("Apakah pemeriksaan fisik barang untuk PIB No. \(pib.noPib) sudah selesai?")
+        }
+        .alert("Batalkan Pemeriksaan?", isPresented: $showBatalConfirm) {
+            Button("Tidak", role: .cancel) {}
+            Button("Ya, Batalkan", role: .destructive) {
+                Task { await submitBatal() }
+            }
+        } message: {
+            Text("Batalkan pemeriksaan untuk PIB No. \(pib.noPib)?")
+        }
+    }
+
+    private func loadDetails() async {
+        isLoadingContainers = true
+        defer { isLoadingContainers = false }
+        async let cTask: [ContainerItem] = (try? await SiapApiClient.shared.fetchContainers(kodeTiket: pib.kodeTiket)) ?? []
+        async let dTask: [String: String] = (try? await SiapApiClient.shared.fetchDokumen(kodeTiket: pib.kodeTiket)) ?? [:]
+        containers = await cTask
+        dokapLinks = await dTask
+    }
+
+    private func findDokapUrl(keys: [String]) -> URL? {
+        for (k, v) in dokapLinks {
+            let kl = k.lowercased()
+            let trimmed = v.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.isEmpty || trimmed == "-" || trimmed == "null" { continue }
+            if keys.contains(where: { kl.contains($0) }) {
+                if trimmed.hasPrefix("http"), let u = URL(string: trimmed) { return u }
+                if let u = URL(string: "https://bcpriok.net/\(trimmed.trimmingCharacters(in: CharacterSet(charactersIn: "/")))") {
+                    return u
+                }
+            }
+        }
+        return nil
+    }
+
+    private func openDokap(title: String, keys: [String]) {
+        if let url = findDokapUrl(keys: keys) {
+            app.activeDokap = DokapTarget(title: title, url: url)
+        } else {
+            app.showToast("Link \(title) belum tersedia dari server")
+        }
+    }
+
+    private func submitSelesai() async {
+        isSubmittingAction = true
+        defer { isSubmittingAction = false }
+        do {
+            try await SiapApiClient.shared.updateSelesaiPeriksa(kodeTiket: pib.kodeTiket)
+            app.showToast("PIB \(pib.noPib) ditandai Selesai Periksa")
+            await app.loadPibs()
+            app.selectedPib = nil
+        } catch {
+            app.showToast("Gagal selesai: \(error.localizedDescription)")
+        }
+    }
+
+    private func submitBatal() async {
+        isSubmittingAction = true
+        defer { isSubmittingAction = false }
+        do {
+            try await SiapApiClient.shared.updateBatalPeriksa(kodeTiket: pib.kodeTiket)
+            app.showToast("PIB \(pib.noPib) dibatalkan")
+            await app.loadPibs()
+            app.selectedPib = nil
+        } catch {
+            app.showToast("Gagal batal: \(error.localizedDescription)")
+        }
+    }
+}
+
+struct SiapMetaRow: View {
+    let label: String
+    let value: String
+    let colors: SiapColors
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Text(label)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(colors.textHint)
+                .frame(width: 112, alignment: .leading)
+            Text(value.isEmpty ? "-" : value)
+                .font(.system(size: 12.5, weight: .semibold))
+                .foregroundStyle(colors.textPrimary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .multilineTextAlignment(.leading)
+        }
+    }
+}
+
+struct ContainerCardRow: View {
+    let container: ContainerItem
+    let colors: SiapColors
+    let onOpenUpload: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            HStack(spacing: 8) {
+                Image(systemName: "shippingbox.fill")
+                    .foregroundStyle(colors.primaryAction)
+                Text(container.noContainer)
+                    .font(.system(size: 15.5, weight: .heavy, design: .monospaced))
+                    .foregroundStyle(colors.textPrimary)
+                if !container.ukuranContainer.isEmpty && container.ukuranContainer != "-" {
+                    Text("UK \(container.ukuranContainer)")
+                        .font(.system(size: 11, weight: .bold))
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 3)
+                        .background(colors.primaryContainer)
+                        .foregroundStyle(colors.onPrimaryContainer)
+                        .clipShape(Capsule())
+                }
+                Spacer()
+            }
+
+            if !container.instruksiLorong.isEmpty && container.instruksiLorong != "-" {
+                HStack(spacing: 6) {
+                    Image(systemName: "arrow.triangle.branch")
+                        .font(.system(size: 11))
+                        .foregroundStyle(colors.secondary)
+                    Text("Lorong: \(container.instruksiLorong)")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(colors.textSecondary)
+                }
+            }
+
+            if !container.pelaksanaanLorong.isEmpty && container.pelaksanaanLorong != "-" {
+                Text("Pelaksanaan: \(container.pelaksanaanLorong)")
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(colors.textSecondary)
+            }
+
+            if !container.teknikPeriksa.isEmpty && container.teknikPeriksa != "-" {
+                Text("Teknik: \(container.teknikPeriksa)")
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(colors.textHint)
+            }
+
+            SiapFilledButton(
+                "Foto & Upload Pemeriksaan",
+                icon: "camera.fill",
+                bg: colors.primaryAction,
+                fg: colors.onPrimaryAction,
+                action: onOpenUpload
+            )
+        }
+        .padding(13)
+        .background(colors.surface)
+        .overlay(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .stroke(colors.cardBorder, lineWidth: 1)
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+    }
+}
+
+struct DokapPillButton: View {
+    let title: String
+    let icon: String
+    let available: Bool
+    let colors: SiapColors
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 4) {
+                Image(systemName: icon).font(.system(size: 11, weight: .bold))
+                Text(title).font(.system(size: 11.5, weight: .bold))
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 8)
+            .background(available ? colors.primaryContainer : colors.surfaceElevated)
+            .foregroundStyle(available ? colors.onPrimaryContainer : colors.textHint)
+            .overlay(
+                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    .stroke(available ? colors.primaryAction.opacity(0.45) : colors.cardBorder, lineWidth: 1)
+            )
+            .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+// MARK: - Full-Screen Drill-Down: UploadFotoPanel (Matches Android UploadFotoPanel)
+
+struct UploadFotoPanel: View {
+    @EnvironmentObject var app: AppState
+    let pib: PibDocument
+    let initialNokon: String
+    let allContainers: [ContainerItem]
+    let colors: SiapColors
+
+    @StateObject private var locMgr = LocationManager()
+    @State private var selectedNokon = ""
+    @State private var selectedStep: StepOption = StepOption.allSteps[0]
+    @State private var deskripsi = ""
+    @State private var watermarkEnabled = true
+    @State private var pickedImage: UIImage?
+    @State private var pickerSource: UIImagePickerController.SourceType?
+    @State private var isUploading = false
+    @State private var isOcrRunning = false
+    @State private var onlineImages: [OnlineImageItem] = []
+    @State private var isLoadingImages = false
+    @State private var fullscreenImage: OnlineImageItem?
+    @State private var deleteTarget: OnlineImageItem?
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 14) {
+                // Container Switcher Pills
+                if !allContainers.isEmpty {
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 7) {
+                            ForEach(allContainers) { c in
+                                let active = selectedNokon == c.noContainer
+                                Button {
+                                    selectedNokon = c.noContainer
+                                    Task { await loadImages() }
+                                } label: {
+                                    Text(c.noContainer)
+                                        .font(.system(size: 12, weight: .bold, design: .monospaced))
+                                        .padding(.horizontal, 11)
+                                        .padding(.vertical, 7)
+                                        .background(active ? colors.primaryAction : colors.surface)
+                                        .foregroundStyle(active ? colors.onPrimaryAction : colors.textSecondary)
+                                        .overlay(
+                                            Capsule().stroke(active ? Color.clear : colors.cardBorder, lineWidth: 1)
+                                        )
+                                        .clipShape(Capsule())
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
+                        .padding(.horizontal, 12)
+                    }
+                    .padding(.top, 10)
+                }
+
+                // Step Selector Chips (Matches Android UploadFotoPanel)
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Tahap Foto Pemeriksaan")
+                        .font(.system(size: 13, weight: .bold))
+                        .foregroundStyle(colors.textSecondary)
+                        .padding(.horizontal, 14)
+
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 7) {
+                            ForEach(StepOption.allSteps) { step in
+                                let active = selectedStep.id == step.id
+                                Button { selectedStep = step } label: {
+                                    Text("\(step.id). \(step.label)")
+                                        .font(.system(size: 12, weight: .bold))
+                                        .padding(.horizontal, 12)
+                                        .padding(.vertical, 8)
+                                        .background(active ? colors.primaryAction : colors.surface)
+                                        .foregroundStyle(active ? colors.onPrimaryAction : colors.textPrimary)
+                                        .overlay(
+                                            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                                .stroke(active ? Color.clear : colors.cardBorder, lineWidth: 1)
+                                        )
+                                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
+                        .padding(.horizontal, 12)
+                    }
+                }
+
+                // Capture & Watermark Card
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Watermark GPS + WIB")
+                                .font(.system(size: 13.5, weight: .bold))
+                                .foregroundStyle(colors.textPrimary)
+                            Text("GPS: \(locMgr.coordinateText)")
+                                .font(.system(size: 11.5, design: .monospaced))
+                                .foregroundStyle(colors.secondary)
+                        }
+                        Spacer()
+                        Toggle("", isOn: $watermarkEnabled)
+                            .labelsHidden()
+                            .tint(colors.primaryAction)
+                    }
+
+                    TextField("Keterangan / deskripsi foto (opsional)", text: $deskripsi)
+                        .font(.system(size: 13.5))
+                        .foregroundStyle(colors.textPrimary)
+                        .padding(11)
+                        .background(colors.surfaceElevated)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                .stroke(colors.cardBorder, lineWidth: 1)
+                        )
+                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+
+                    HStack(spacing: 10) {
+                        SiapFilledButton(
+                            "Kamera",
+                            icon: "camera.fill",
+                            bg: colors.primaryAction,
+                            fg: colors.onPrimaryAction
+                        ) {
+                            pickerSource = UIImagePickerController.isSourceTypeAvailable(.camera) ? .camera : .photoLibrary
+                        }
+
+                        SiapOutlinedButton(
+                            "Galeri",
+                            icon: "photo.on.rectangle.angled",
+                            color: colors.secondary,
+                            bg: colors.surfaceElevated
+                        ) {
+                            pickerSource = .photoLibrary
+                        }
+                    }
+
+                    if let img = pickedImage {
+                        VStack(spacing: 10) {
+                            Image(uiImage: img)
+                                .resizable()
+                                .scaledToFit()
+                                .frame(maxHeight: 240)
+                                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+
+                            HStack(spacing: 8) {
+                                SiapOutlinedButton(
+                                    isOcrRunning ? "Memindai..." : "OCR Kontainer",
+                                    icon: "viewfinder",
+                                    color: colors.secondary,
+                                    bg: colors.surfaceElevated
+                                ) {
+                                    Task { await runOcr(on: img) }
+                                }
+                                .disabled(isOcrRunning)
+
+                                SiapOutlinedButton("Hapus", icon: "trash", color: colors.danger) {
+                                    pickedImage = nil
+                                }
+                                .frame(width: 105)
+                            }
+
+                            SiapFilledButton(
+                                isUploading ? "Mengunggah ke FTP & SIAP..." : "Unggah Foto Sekarang",
+                                icon: "icloud.and.arrow.up.fill",
+                                bg: colors.success,
+                                fg: colors.isDark ? Color(hex: 0x052E16) : .white,
+                                isLoading: isUploading
+                            ) {
+                                Task { await uploadPhoto(img) }
+                            }
+                            .disabled(isUploading)
+                        }
+                    }
+                }
+                .padding(14)
+                .background(colors.surface)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 15, style: .continuous)
+                        .stroke(colors.cardBorder, lineWidth: 1)
+                )
+                .clipShape(RoundedRectangle(cornerRadius: 15, style: .continuous))
+                .padding(.horizontal, 12)
+
+                // Foto Terunggah Grid
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack {
+                        Text("Foto Terunggah (\(onlineImages.count))")
+                            .font(.system(size: 14.5, weight: .bold))
+                            .foregroundStyle(colors.textPrimary)
+                        Spacer()
+                        Button {
+                            Task { await loadImages() }
+                        } label: {
+                            Image(systemName: "arrow.clockwise")
+                                .foregroundStyle(colors.primaryAction)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    .padding(.horizontal, 14)
+
+                    if isLoadingImages {
+                        ProgressView().tint(colors.primaryAction).frame(maxWidth: .infinity).padding()
+                    } else if onlineImages.isEmpty {
+                        Text("Belum ada foto terunggah untuk \(selectedNokon).")
+                            .font(.system(size: 13))
+                            .foregroundStyle(colors.textHint)
+                            .padding(16)
+                            .frame(maxWidth: .infinity)
+                            .background(colors.surface)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 13, style: .continuous)
+                                    .stroke(colors.cardBorder, lineWidth: 1)
+                            )
+                            .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
+                            .padding(.horizontal, 12)
+                    } else {
+                        let cols = [GridItem(.flexible(), spacing: 8), GridItem(.flexible(), spacing: 8), GridItem(.flexible(), spacing: 8)]
+                        LazyVGrid(columns: cols, spacing: 8) {
+                            ForEach(onlineImages) { item in
+                                ZStack(alignment: .topTrailing) {
+                                    Button {
+                                        fullscreenImage = item
+                                    } label: {
+                                        VStack(spacing: 4) {
+                                            if let url = item.resolvedURL {
+                                                AsyncImage(url: url) { phase in
+                                                    if let img = phase.image {
+                                                        img.resizable().scaledToFill()
+                                                    } else {
+                                                        colors.surfaceElevated
+                                                    }
+                                                }
+                                                .frame(height: 98)
+                                                .clipped()
+                                                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                                            }
+                                            Text(item.ketPraPemeriksaan.isEmpty ? "Foto #\(item.id)" : item.ketPraPemeriksaan)
+                                                .font(.system(size: 10.5, weight: .medium))
+                                                .foregroundStyle(colors.textSecondary)
+                                                .lineLimit(1)
+                                        }
+                                        .padding(6)
+                                        .background(colors.surface)
+                                        .overlay(
+                                            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                                .stroke(colors.cardBorder, lineWidth: 1)
+                                        )
+                                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                                    }
+                                    .buttonStyle(.plain)
+
+                                    Button {
+                                        deleteTarget = item
+                                    } label: {
+                                        Image(systemName: "xmark.circle.fill")
+                                            .font(.system(size: 18))
+                                            .foregroundStyle(colors.danger)
+                                            .background(Circle().fill(colors.surface))
+                                    }
+                                    .buttonStyle(.plain)
+                                    .padding(4)
+                                }
+                            }
+                        }
+                        .padding(.horizontal, 12)
+                    }
+                }
+            }
+            .padding(.bottom, 24)
+        }
+        .onAppear {
+            if selectedNokon.isEmpty { selectedNokon = initialNokon }
+            locMgr.request()
+        }
+        .task {
+            if selectedNokon.isEmpty { selectedNokon = initialNokon }
+            await loadImages()
+        }
+        .sheet(item: Binding(
+            get: { pickerSource.map { SourceTypeWrapper(source: $0) } },
+            set: { if $0 == nil { pickerSource = nil } }
+        )) { wrapper in
+            ImagePicker(sourceType: wrapper.source) { img in
+                pickedImage = img
+            }
+        }
+        .sheet(item: $fullscreenImage) { item in
+            ZStack(alignment: .topTrailing) {
+                Color.black.ignoresSafeArea()
+                if let url = item.resolvedURL {
+                    AsyncImage(url: url) { phase in
+                        if let img = phase.image {
+                            img.resizable().scaledToFit().frame(maxWidth: .infinity, maxHeight: .infinity)
+                        } else {
+                            ProgressView().tint(.white)
+                        }
+                    }
+                }
+                Button {
+                    fullscreenImage = nil
+                } label: {
+                    Text("Tutup")
+                        .font(.system(size: 14, weight: .bold))
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 8)
+                        .background(Color.white.opacity(0.2))
+                        .foregroundStyle(.white)
+                        .clipShape(Capsule())
+                }
+                .padding(18)
+            }
+        }
+        .alert("Hapus Foto?", isPresented: Binding(
+            get: { deleteTarget != nil },
+            set: { if !$0 { deleteTarget = nil } }
+        )) {
+            Button("Batal", role: .cancel) { deleteTarget = nil }
+            Button("Hapus", role: .destructive) {
+                if let target = deleteTarget {
+                    Task {
+                        do {
+                            try await SiapApiClient.shared.deleteImage(imageId: target.id)
+                            app.showToast("Foto berhasil dihapus")
+                            await loadImages()
+                        } catch {
+                            app.showToast("Gagal hapus foto: \(error.localizedDescription)")
+                        }
+                        deleteTarget = nil
+                    }
+                }
+            }
+        } message: {
+            Text("Hapus foto ini dari pemeriksaan?")
+        }
+    }
+
+    private func loadImages() async {
+        isLoadingImages = true
+        defer { isLoadingImages = false }
+        onlineImages = (try? await SiapApiClient.shared.fetchImages(kodeTiket: pib.kodeTiket, nokon: selectedNokon)) ?? []
+    }
+
+    private func runOcr(on image: UIImage) async {
+        isOcrRunning = true
+        defer { isOcrRunning = false }
+        if let found = await ContainerOcrScanner.scanContainerNumber(from: image) {
+            selectedNokon = found
+            app.showToast("OCR Kontainer terdeteksi: \(found)")
+        } else {
+            app.showToast("Nomor kontainer tidak terdeteksi di foto")
+        }
+    }
+
+    private func uploadPhoto(_ raw: UIImage) async {
+        isUploading = true
+        defer { isUploading = false }
+        let monthFolder = SiapCrypto.currentMonthYear()
+        let waktu = SiapCrypto.currentExifTimestamp()
+        let isLcl = pib.isLclDefault || selectedNokon.uppercased() == "LCL"
+        let activeUkuran = allContainers.first(where: { $0.noContainer == selectedNokon })?.ukuranContainer ?? ""
+        let fileName = SiapCrypto.buildInspectionFileName(
+            kodeTiket: pib.kodeTiket,
+            isLcl: isLcl,
+            nokon: selectedNokon,
+            waktuFoto: waktu,
+            stepLabel: selectedStep.label,
+            stepCode: selectedStep.code,
+            urutanBarang: "\(onlineImages.count + 1)",
+            ext: "jpg"
+        )
+        guard let jpegData = ImageWatermarkProcessor.process(
+            image: raw,
+            watermark: watermarkEnabled,
+            noPib: pib.noPib,
+            nokon: selectedNokon,
+            stepLabel: selectedStep.label,
+            lokasi: locMgr.coordinateText
+        ) else {
+            app.showToast("Gagal memproses gambar")
+            return
+        }
+        do {
+            _ = try await SiapFtpClient.shared.upload(remoteDir: monthFolder, remoteFilename: fileName, data: jpegData)
+            _ = try await SiapApiClient.shared.insertImage(
+                isLcl: isLcl,
+                kodeTiket: pib.kodeTiket,
+                nokon: selectedNokon,
+                urlImage: "\(monthFolder)/\(fileName)",
+                stepLabel: selectedStep.label,
+                seriBarang: "",
+                ketSeriBarang: deskripsi,
+                lokasi: locMgr.coordinateText,
+                ukuran: activeUkuran,
+                waktuFoto: waktu,
+                uraianBarang: deskripsi,
+                jumlahJenisKemasan: ""
+            )
+            pickedImage = nil
+            deskripsi = ""
+            app.showToast("Foto berhasil diunggah!")
+            await loadImages()
+        } catch {
+            app.showToast("Upload gagal: \(error.localizedDescription)")
+        }
+    }
+}
+
+private struct SourceTypeWrapper: Identifiable {
+    let id = UUID()
+    let source: UIImagePickerController.SourceType
+}
+
+// MARK: - Dedicated TTD PJ Modal Sheet (High-Contrast Dark/Light!)
+
+struct TtdPjModalSheet: View {
+    @EnvironmentObject var app: AppState
+    @Environment(\.dismiss) private var dismiss
+    let pib: PibDocument
+    let colors: SiapColors
+
+    @StateObject private var sigStore = SignatureStrokeStore()
+    @State private var namaPj = ""
+    @State private var isUploading = false
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Tanda Tangan PJ (PPJK / Importir)")
+                        .font(.system(size: 16, weight: .bold))
+                        .foregroundStyle(.white)
+                    Text("PIB \(pib.noPib) • \(pib.importir)")
+                        .font(.system(size: 12))
+                        .foregroundStyle(SiapColors.hintOnNavy)
+                        .lineLimit(1)
+                }
+                Spacer()
+                Button {
+                    dismiss()
+                } label: {
+                    Text("Tutup")
+                        .font(.system(size: 13, weight: .bold))
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                        .background(Color.white.opacity(0.16))
+                        .foregroundStyle(.white)
+                        .clipShape(Capsule())
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(16)
+            .background(colors.headerGradient)
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Nama Pengurus (PJ)")
+                            .font(.system(size: 12.5, weight: .bold))
+                            .foregroundStyle(colors.textSecondary)
+                        TextField("Masukkan nama pengurus / PJ", text: $namaPj)
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundStyle(colors.textPrimary)
+                            .padding(12)
+                            .background(colors.surfaceElevated)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 11, style: .continuous)
+                                    .stroke(colors.cardBorder, lineWidth: 1)
+                            )
+                            .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
+                    }
+
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Goreskan Tanda Tangan di Area Putih")
+                            .font(.system(size: 12.5, weight: .bold))
+                            .foregroundStyle(colors.textSecondary)
+
+                        SignaturePadView(store: sigStore)
+                            .frame(height: 220)
+                            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                    .stroke(colors.primaryAction.opacity(0.6), lineWidth: 1.5)
+                            )
+                    }
+
+                    HStack(spacing: 10) {
+                        SiapOutlinedButton("Hapus", icon: "eraser.fill", color: colors.danger, bg: colors.danger.opacity(0.1)) {
+                            sigStore.clear()
+                        }
+                        .frame(width: 115)
+
+                        SiapFilledButton(
+                            isUploading ? "Mengunggah..." : "Upload TTD PJ",
+                            icon: "checkmark.circle.fill",
+                            bg: colors.primaryAction,
+                            fg: colors.onPrimaryAction,
+                            isLoading: isUploading
+                        ) {
+                            Task { await uploadTtd() }
+                        }
+                        .disabled(isUploading || namaPj.trimmingCharacters(in: .whitespaces).isEmpty)
+                    }
+                }
+                .padding(16)
+            }
+            .background(colors.backdrop)
+        }
+        .onAppear {
+            if namaPj.isEmpty && pib.namaPj != "-" {
+                namaPj = pib.namaPj
+            }
+        }
+    }
+
+    private func uploadTtd() async {
+        let cleanName = namaPj.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanName.isEmpty else {
+            app.showToast("Nama Pengurus wajib diisi")
+            return
+        }
+        guard !sigStore.strokes.isEmpty else {
+            app.showToast("Silakan tanda tangan terlebih dahulu")
+            return
+        }
+        isUploading = true
+        defer { isUploading = false }
+        let monthFolder = SiapCrypto.currentMonthYear()
+        let fileName = "ttd_\(SiapCrypto.sanitizeToken(pib.kodeTiket))_\(Int(Date().timeIntervalSince1970)).png"
+        guard let pngData = sigStore.renderImage().pngData() else { return }
+        do {
+            _ = try await SiapFtpClient.shared.upload(remoteDir: monthFolder, remoteFilename: fileName, data: pngData)
+            try await SiapApiClient.shared.insertTtdPj(kodeTiket: pib.kodeTiket, namaPj: cleanName, relUrl: "\(monthFolder)/\(fileName)")
+            app.showToast("TTD PJ berhasil diunggah!")
+            dismiss()
+        } catch {
+            app.showToast("Gagal upload TTD PJ: \(error.localizedDescription)")
+        }
+    }
+}
+
+// MARK: - In-App Dokap Viewer (PIB / INV-PL / B/L / BAP)
+
+struct DokapViewerPanel: View {
+    let target: DokapTarget
+    let colors: SiapColors
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Text(target.url.absoluteString)
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(colors.textHint)
+                    .lineLimit(1)
+                Spacer()
+                Button {
+                    UIApplication.shared.open(target.url)
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "safari.fill")
+                        Text("Safari")
+                    }
+                    .font(.system(size: 12, weight: .bold))
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 5)
+                    .background(colors.primaryContainer)
+                    .foregroundStyle(colors.onPrimaryContainer)
+                    .clipShape(Capsule())
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .background(colors.surface)
+            .overlay(alignment: .bottom) {
+                Rectangle().fill(colors.divider).frame(height: 0.75)
+            }
+
+            SiapWebView(url: target.url)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+    }
+}
+
+// MARK: - Manual PIB Modal Sheet
+
+struct ManualPibSheet: View {
+    @EnvironmentObject var app: AppState
+    @Environment(\.dismiss) private var dismiss
+    let colors: SiapColors
+
+    @State private var noPib = ""
+    @State private var tglDate = Date()
+    @State private var isSaving = false
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Text("Tambah Dokumen PIB Manual")
+                    .font(.system(size: 16, weight: .bold))
+                    .foregroundStyle(.white)
+                Spacer()
+                Button {
+                    dismiss()
+                } label: {
+                    Text("Tutup")
+                        .font(.system(size: 13, weight: .bold))
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                        .background(Color.white.opacity(0.16))
+                        .foregroundStyle(.white)
+                        .clipShape(Capsule())
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(16)
+            .background(colors.headerGradient)
+
+            VStack(alignment: .leading, spacing: 16) {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Nomor PIB (6 digit)")
+                        .font(.system(size: 12.5, weight: .bold))
+                        .foregroundStyle(colors.textSecondary)
+                    TextField("Masukkan Nomor PIB...", text: $noPib)
+                        .keyboardType(.numberPad)
+                        .font(.system(size: 15, weight: .bold, design: .monospaced))
+                        .foregroundStyle(colors.textPrimary)
+                        .padding(12)
+                        .background(colors.surfaceElevated)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 11, style: .continuous)
+                                .stroke(colors.cardBorder, lineWidth: 1)
+                        )
+                        .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
+                }
+
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Tanggal PIB")
+                        .font(.system(size: 12.5, weight: .bold))
+                        .foregroundStyle(colors.textSecondary)
+                    DatePicker("Tanggal PIB", selection: $tglDate, displayedComponents: .date)
+                        .datePickerStyle(.compact)
+                        .tint(colors.primaryAction)
+                        .padding(10)
+                        .background(colors.surfaceElevated)
+                        .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
+                }
+
+                SiapFilledButton(
+                    isSaving ? "Menyimpan..." : "Simpan Dokumen Manual",
+                    icon: "checkmark.circle.fill",
+                    bg: colors.primaryAction,
+                    fg: colors.onPrimaryAction,
+                    isLoading: isSaving
+                ) {
+                    Task { await saveManual() }
+                }
+                .disabled(isSaving || noPib.trimmingCharacters(in: .whitespaces).isEmpty)
+
+                Spacer()
+            }
+            .padding(16)
+            .background(colors.backdrop)
+        }
+    }
+
+    private func saveManual() async {
+        guard let nip = app.session?.nip else { return }
+        isSaving = true
+        defer { isSaving = false }
+        let df = SiapCrypto.wibFormatter("yyyy-MM-dd")
+        do {
+            try await SiapApiClient.shared.insertDokManual(
+                nip: nip,
+                noPib: noPib.trimmingCharacters(in: .whitespacesAndNewlines),
+                tglPib: df.string(from: tglDate)
+            )
+            app.showToast("Dokumen PIB manual ditambahkan!")
+            await app.loadPibs()
+            dismiss()
+        } catch {
+            app.showToast("Gagal simpan: \(error.localizedDescription)")
+        }
+    }
+}
+
+// MARK: - Tab 2: Instruksi Lorong
 
 struct LorongTabView: View {
     @EnvironmentObject var app: AppState
-    @State private var searchText = ""
+    let colors: SiapColors
+    @State private var query = ""
 
     private var filtered: [InstruksiLorongItem] {
-        let q = searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        guard !q.isEmpty else { return app.lorongItems }
+        let q = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if q.isEmpty { return app.lorongItems }
         return app.lorongItems.filter {
             $0.noContainer.lowercased().contains(q)
                 || $0.noPib.lowercased().contains(q)
@@ -711,701 +2043,440 @@ struct LorongTabView: View {
     }
 
     var body: some View {
-        NavigationStack {
-            List {
+        ScrollView {
+            LazyVStack(spacing: 10) {
+                HStack(spacing: 8) {
+                    Image(systemName: "magnifyingglass").foregroundStyle(colors.textHint)
+                    TextField("Cari Kontainer, PIB, Instruksi...", text: $query)
+                        .font(.system(size: 13.5))
+                        .foregroundStyle(colors.textPrimary)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                    if !query.isEmpty {
+                        Button { query = "" } label: {
+                            Image(systemName: "xmark.circle.fill").foregroundStyle(colors.textHint)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    Button {
+                        Task { await app.loadLorong() }
+                    } label: {
+                        Image(systemName: "arrow.clockwise").foregroundStyle(colors.primaryAction)
+                    }
+                    .buttonStyle(.plain)
+                }
+                .padding(11)
+                .background(colors.surface)
+                .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).stroke(colors.cardBorder, lineWidth: 1))
+                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .padding(.horizontal, 12)
+                .padding(.top, 10)
+
                 if app.isLoadingLorong && app.lorongItems.isEmpty {
-                    ProgressView("Memuat daftar kontainer & instruksi lorong...")
-                        .frame(maxWidth: .infinity, alignment: .center)
+                    ProgressView("Memuat Instruksi Lorong...").tint(colors.primaryAction).padding(.top, 40)
                 } else if filtered.isEmpty {
-                    Text("Belum ada data instruksi lorong aktif.")
-                        .foregroundStyle(.secondary)
+                    VStack(spacing: 10) {
+                        Image(systemName: "shippingbox").font(.system(size: 36)).foregroundStyle(colors.textHint)
+                        Text("Belum ada Instruksi Lorong").font(.system(size: 15, weight: .bold)).foregroundStyle(colors.textPrimary)
+                    }
+                    .padding(32)
+                    .frame(maxWidth: .infinity)
+                    .background(colors.surface)
+                    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    .padding(.horizontal, 12)
                 } else {
                     ForEach(filtered) { item in
-                        let st = SiapPalette.statusColors(for: item.status)
-                        VStack(alignment: .leading, spacing: 6) {
+                        VStack(alignment: .leading, spacing: 8) {
                             HStack {
                                 Text(item.noContainer)
-                                    .font(.headline.monospaced())
-                                if item.ukuranContainer != "-" {
-                                    Text("\(item.ukuranContainer)ft")
-                                        .font(.caption2.bold())
-                                        .padding(.horizontal, 6)
-                                        .padding(.vertical, 2)
-                                        .background(Color.blue.opacity(0.14))
-                                        .foregroundStyle(.blue)
-                                        .cornerRadius(5)
+                                    .font(.system(size: 15.5, weight: .heavy, design: .monospaced))
+                                    .foregroundStyle(colors.textPrimary)
+                                if !item.ukuranContainer.isEmpty && item.ukuranContainer != "-" {
+                                    Text("UK \(item.ukuranContainer)")
+                                        .font(.system(size: 11, weight: .bold))
+                                        .padding(.horizontal, 7)
+                                        .padding(.vertical, 3)
+                                        .background(colors.primaryContainer)
+                                        .foregroundStyle(colors.onPrimaryContainer)
+                                        .clipShape(Capsule())
                                 }
                                 Spacer()
-                                Text(item.status)
-                                    .font(.caption2.bold())
-                                    .padding(.horizontal, 8)
-                                    .padding(.vertical, 3)
-                                    .background(st.bg)
-                                    .foregroundStyle(st.fg)
-                                    .clipShape(Capsule())
+                                SiapStatusChip(text: item.status, colors: colors)
                             }
-                            Text("PIB \(item.noPib) • Tgl \(SiapCrypto.formatDisplayDate(item.tglPib)) • Tiket \(item.kodeTiket)")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                            HStack(spacing: 12) {
-                                Label("Lorong: \(item.instruksiLorong)", systemImage: "arrow.triangle.branch")
-                                Label("Pel: \(item.pelaksanaanLorong)", systemImage: "checkmark.circle")
+
+                            HStack(spacing: 8) {
+                                Text("PIB \(item.noPib) • \(SiapCrypto.formatDisplayDate(item.tglPib))")
+                                    .font(.system(size: 12, weight: .semibold))
+                                    .foregroundStyle(colors.textSecondary)
+                                Spacer()
+                                Button {
+                                    UIPasteboard.general.string = item.noContainer
+                                    app.showToast("Disalin: \(item.noContainer)")
+                                } label: {
+                                    Image(systemName: "doc.on.doc")
+                                        .font(.system(size: 12.5, weight: .bold))
+                                        .foregroundStyle(colors.secondary)
+                                }
+                                .buttonStyle(.plain)
                             }
-                            .font(.caption.weight(.medium))
-                            .foregroundStyle(.primary)
-                            if item.teknikPeriksa != "-" {
-                                Text("Teknik: \(item.teknikPeriksa)")
-                                    .font(.caption2)
-                                    .foregroundStyle(.secondary)
+
+                            if !item.instruksiLorong.isEmpty && item.instruksiLorong != "-" {
+                                SiapMetaRow(label: "Instruksi", value: item.instruksiLorong, colors: colors)
+                            }
+                            if !item.pelaksanaanLorong.isEmpty && item.pelaksanaanLorong != "-" {
+                                SiapMetaRow(label: "Pelaksanaan", value: item.pelaksanaanLorong, colors: colors)
+                            }
+                            if !item.alasanLorong.isEmpty && item.alasanLorong != "-" {
+                                SiapMetaRow(label: "Alasan", value: item.alasanLorong, colors: colors)
                             }
                         }
-                        .padding(.vertical, 4)
+                        .padding(13)
+                        .background(colors.surface)
+                        .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).stroke(colors.cardBorder, lineWidth: 1))
+                        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                        .padding(.horizontal, 12)
                     }
                 }
             }
-            .searchable(text: $searchText, prompt: "Cari Kontainer / PIB / Lorong")
-            .refreshable { await app.loadLorong() }
-            .navigationTitle("Instruksi Lorong")
-            .task {
-                if app.lorongItems.isEmpty { await app.loadLorong() }
+            .padding(.bottom, 18)
+        }
+        .refreshable { await app.loadLorong() }
+        .task {
+            if app.lorongItems.isEmpty && app.session != nil {
+                await app.loadLorong()
             }
         }
     }
 }
 
-// MARK: - Tab 3: Browse (Browse PIB SIAP FB + Pendok SIAP 3.0)
+// MARK: - Tab 3: Browse PIB & Pendok MK
 
 struct BrowseTabView: View {
     @EnvironmentObject var app: AppState
-    @State private var mode = 0 // 0 = Browse PIB, 1 = Pendok SIAP 3.0
+    let colors: SiapColors
+
+    @State private var mode = 0
     @State private var query = ""
+    @State private var isLoading = false
     @State private var pibResults: [PibDocument] = []
     @State private var pendokResults: [PendokItem] = []
-    @State private var selectedPib: PibDocument?
-    @State private var isLoading = false
 
     var body: some View {
-        NavigationStack {
-            VStack(spacing: 0) {
-                Picker("Mode", selection: $mode) {
-                    Text("Browse PIB").tag(0)
-                    Text("Pendok SIAP 3.0").tag(1)
+        ScrollView {
+            VStack(spacing: 12) {
+                // Segmented Pill Switcher
+                HStack(spacing: 6) {
+                    BrowseSegmentPill(title: "Browse PIB", active: mode == 0, colors: colors) { mode = 0 }
+                    BrowseSegmentPill(title: "Pendok MK (SIAP 3.0)", active: mode == 1, colors: colors) { mode = 1 }
                 }
-                .pickerStyle(.segmented)
-                .padding(.horizontal)
-                .padding(.vertical, 8)
+                .padding(.horizontal, 12)
+                .padding(.top, 10)
 
-                List {
-                    if isLoading {
-                        ProgressView("Mencari data...")
-                            .frame(maxWidth: .infinity, alignment: .center)
-                    } else if mode == 0 {
-                        if pibResults.isEmpty {
-                            Text("Masukkan nomor PIB lalu tekan Cari untuk browse data di SIAP FB.")
-                                .foregroundStyle(.secondary)
-                        } else {
-                            ForEach(pibResults) { doc in
-                                Button {
-                                    selectedPib = doc
-                                } label: {
-                                    VStack(alignment: .leading, spacing: 4) {
-                                        HStack {
-                                            Text("PIB \(doc.noPib)").font(.headline).foregroundStyle(.primary)
-                                            Spacer()
-                                            Text(doc.status).font(.caption.bold()).foregroundStyle(.blue)
-                                        }
-                                        Text(doc.importir).font(.subheadline).foregroundStyle(.primary)
-                                        Text("Tiket: \(doc.kodeTiket) • TPS: \(doc.kodeTps) • Tgl: \(SiapCrypto.formatDisplayDate(doc.tglPib))")
-                                            .font(.caption).foregroundStyle(.secondary)
-                                    }
-                                    .padding(.vertical, 3)
-                                }
-                            }
+                // Search Row
+                HStack(spacing: 8) {
+                    TextField(mode == 0 ? "Masukkan No. PIB..." : "Cari PIB / Importir Pendok...", text: $query)
+                        .font(.system(size: 13.5))
+                        .foregroundStyle(colors.textPrimary)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .padding(11)
+                        .background(colors.surface)
+                        .overlay(RoundedRectangle(cornerRadius: 11, style: .continuous).stroke(colors.cardBorder, lineWidth: 1))
+                        .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
+
+                    Button {
+                        Task { await search() }
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: "magnifyingglass")
+                            Text("Cari")
                         }
+                        .font(.system(size: 13, weight: .bold))
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 11)
+                        .background(colors.primaryAction)
+                        .foregroundStyle(colors.onPrimaryAction)
+                        .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(isLoading)
+                }
+                .padding(.horizontal, 12)
+
+                if isLoading {
+                    ProgressView("Mencari data...").tint(colors.primaryAction).padding(.top, 30)
+                } else if mode == 0 {
+                    if pibResults.isEmpty {
+                        Text("Masukkan nomor PIB lalu tekan Cari.")
+                            .font(.system(size: 13))
+                            .foregroundStyle(colors.textHint)
+                            .padding(.top, 30)
                     } else {
-                        if pendokResults.isEmpty {
-                            Text("Cari nomor PIB atau importir di SIAP 3.0.")
-                                .foregroundStyle(.secondary)
-                        } else {
-                            ForEach(pendokResults) { it in
-                                VStack(alignment: .leading, spacing: 4) {
-                                    HStack {
-                                        Text(it.title).font(.headline)
-                                        Spacer()
-                                        if !it.status.isEmpty {
-                                            Text(it.status).font(.caption2.bold()).foregroundStyle(.blue)
-                                        }
+                        ForEach(pibResults) { doc in
+                            PibGridCardView(
+                                doc: doc,
+                                colors: colors,
+                                isCompact: app.isCompact,
+                                onTap: { app.openPib(doc) },
+                                onWhatsAppPfpd: { app.openWhatsApp(phone: doc.noHpPfpd, message: "Konfirmasi PIB \(doc.noPib)") },
+                                onWhatsAppPj: { app.openWhatsApp(phone: doc.hpPj, message: "Konfirmasi PIB \(doc.noPib)") },
+                                onBatal: {}
+                            )
+                            .padding(.horizontal, 12)
+                        }
+                    }
+                } else {
+                    if pendokResults.isEmpty {
+                        Text("Cari data Pendok MK SIAP 3.0.")
+                            .font(.system(size: 13))
+                            .foregroundStyle(colors.textHint)
+                            .padding(.top, 30)
+                    } else {
+                        ForEach(pendokResults) { item in
+                            VStack(alignment: .leading, spacing: 6) {
+                                HStack {
+                                    Text(item.title)
+                                        .font(.system(size: 14, weight: .bold))
+                                        .foregroundStyle(colors.textPrimary)
+                                    Spacer()
+                                    if !item.status.isEmpty {
+                                        SiapStatusChip(text: item.status, colors: colors)
                                     }
-                                    Text(it.subtitle).font(.caption).foregroundStyle(.secondary)
                                 }
-                                .padding(.vertical, 3)
+                                Text(item.subtitle)
+                                    .font(.system(size: 12))
+                                    .foregroundStyle(colors.textSecondary)
                             }
+                            .padding(13)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(colors.surface)
+                            .overlay(RoundedRectangle(cornerRadius: 13, style: .continuous).stroke(colors.cardBorder, lineWidth: 1))
+                            .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
+                            .padding(.horizontal, 12)
                         }
                     }
                 }
-                .searchable(text: $query, prompt: mode == 0 ? "Nomor PIB (mis. 123456)" : "Cari PIB / Importir di SIAP 3.0")
-                .onSubmit(of: .search) { Task { await runSearch() } }
             }
-            .navigationTitle("Browse & Pendok")
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button("Cari") { Task { await runSearch() } }
-                }
-            }
-            .sheet(item: $selectedPib) { doc in
-                PibDetailSheet(pib: doc)
-            }
+            .padding(.bottom, 18)
         }
     }
 
-    private func runSearch() async {
+    private func search() async {
         guard let sess = app.session else { return }
         isLoading = true
         defer { isLoading = false }
+        let q = query.trimmingCharacters(in: .whitespacesAndNewlines)
         do {
             if mode == 0 {
-                pibResults = try await SiapApiClient.shared.browsePibData(nip: sess.nip, noPib: query)
+                pibResults = try await SiapApiClient.shared.browsePibData(nip: sess.nip, noPib: q)
             } else {
-                pendokResults = try await SiapApiClient.shared.browsePendok(username: sess.username, password: sess.password, query: query)
+                pendokResults = try await SiapApiClient.shared.browsePendok(username: sess.username, password: sess.password, query: q)
             }
         } catch {
-            app.showToast(error.localizedDescription)
+            app.showToast("Gagal mencari: \(error.localizedDescription)")
         }
     }
 }
 
-// MARK: - PIB Detail & Camera Upload Sheet
-
-struct PibDetailSheet: View {
-    @EnvironmentObject var app: AppState
-    @Environment(\.dismiss) private var dismiss
-    let pib: PibDocument
-
-    @StateObject private var locationMgr = LocationManager()
-    @StateObject private var pjSig = SignatureStrokeStore()
-
-    @State private var dokInfo: [String: String] = [:]
-    @State private var containers: [ContainerItem] = []
-    @State private var selectedNokon = ""
-    @State private var isLcl = false
-    @State private var selectedStep = StepOption.allSteps[5]
-    @State private var seriBarang = ""
-    @State private var ketSeri = ""
-    @State private var uraianBarang = ""
-    @State private var jmlKemasan = ""
-    @State private var useWatermark = true
-
-    @State private var pickedImage: UIImage?
-    @State private var pickerSource: UIImagePickerController.SourceType?
-    @State private var isUploading = false
-    @State private var onlineImages: [OnlineImageItem] = []
-
-    @State private var namaPj = ""
-    @State private var isBusyAction = false
+struct BrowseSegmentPill: View {
+    let title: String
+    let active: Bool
+    let colors: SiapColors
+    let action: () -> Void
 
     var body: some View {
-        NavigationStack {
-            Form {
-                Section("Informasi PIB & Pemeriksaan") {
-                    LabeledContent("No PIB", value: pib.noPib)
-                    LabeledContent("Tanggal PIB", value: SiapCrypto.formatDisplayDate(pib.tglPib))
-                    LabeledContent("Kode Tiket", value: pib.kodeTiket)
-                    LabeledContent("Importir", value: dokInfo["importir"]?.isEmpty == false ? dokInfo["importir"]! : pib.importir)
-                    LabeledContent("TPS / Cluster", value: "\(pib.kodeTps) • \(pib.cluster)")
-                    LabeledContent("Status / Persentase", value: "\(pib.status) (\(pib.persentasePeriksa))")
-                    if pib.hasAtensi {
-                        Text("Atensi: \(pib.atensi)")
-                            .font(.footnote.weight(.semibold))
-                            .foregroundStyle(.orange)
-                    }
-                    if pib.namaPj != "-" {
-                        LabeledContent("PJ", value: "\(pib.namaPj) \(pib.hpPj.isEmpty || pib.hpPj == "not found" ? "" : "(\(pib.hpPj))")")
-                    }
-                    if pib.namaPfpd != "-" {
-                        LabeledContent("PFPD", value: pib.namaPfpd)
-                    }
-                }
-
-                Section("Kontainer & Mode") {
-                    Toggle("Mode LCL (Tanpa Kontainer)", isOn: $isLcl)
-                    if !isLcl && !containers.isEmpty {
-                        Picker("Pilih Kontainer", selection: $selectedNokon) {
-                            ForEach(containers) { c in
-                                Text("\(c.noContainer) \(c.ukuranContainer.isEmpty ? "" : "(\(c.ukuranContainer)ft)")")
-                                    .tag(c.noContainer)
-                            }
-                        }
-                        if let activeC = containers.first(where: { $0.noContainer == selectedNokon }) {
-                            Text("Lorong: \(activeC.instruksiLorong) | Pelaksanaan: \(activeC.pelaksanaanLorong) | Teknik: \(activeC.teknikPeriksa)")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                }
-
-                Section("Ambil & Upload Foto Pemeriksaan") {
-                    Picker("Tahap Foto", selection: $selectedStep) {
-                        ForEach(StepOption.allSteps) { step in
-                            Text("\(step.code). \(step.label)").tag(step)
-                        }
-                    }
-                    TextField("Seri Barang (opsional)", text: $seriBarang)
-                    TextField("Keterangan Seri", text: $ketSeri)
-                    TextField("Uraian Barang (opsional)", text: $uraianBarang)
-                    TextField("Jumlah/Jenis Kemasan (mis. 10 CTN)", text: $jmlKemasan)
-                    Toggle("Watermark GPS + WIB", isOn: $useWatermark)
-                    Text("GPS: \(locationMgr.coordinateText)")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-
-                    HStack(spacing: 12) {
-                        Button {
-                            pickerSource = .camera
-                        } label: {
-                            Label("Kamera", systemImage: "camera.fill")
-                                .frame(maxWidth: .infinity)
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .tint(SiapPalette.navy)
-
-                        Button {
-                            pickerSource = .photoLibrary
-                        } label: {
-                            Label("Galeri", systemImage: "photo.fill")
-                                .frame(maxWidth: .infinity)
-                        }
-                        .buttonStyle(.bordered)
-                    }
-
-                    if let img = pickedImage {
-                        Image(uiImage: img)
-                            .resizable()
-                            .scaledToFit()
-                            .frame(maxHeight: 220)
-                            .cornerRadius(10)
-
-                        HStack(spacing: 10) {
-                            Button {
-                                Task { await scanOcr(img) }
-                            } label: {
-                                Label("OCR Kontainer", systemImage: "text.viewfinder")
-                            }
-                            .buttonStyle(.bordered)
-
-                            Button {
-                                Task { await uploadPhoto(img) }
-                            } label: {
-                                HStack {
-                                    if isUploading { ProgressView().tint(.white) }
-                                    Text(isUploading ? "Mengunggah..." : "Upload ke SIAP")
-                                }
-                                .frame(maxWidth: .infinity)
-                            }
-                            .buttonStyle(.borderedProminent)
-                            .tint(.green)
-                            .disabled(isUploading)
-                        }
-                    }
-                }
-
-                Section("Foto Online (\(onlineImages.count))") {
-                    if onlineImages.isEmpty {
-                        Text("Belum ada foto online.")
-                            .foregroundStyle(.secondary)
-                    } else {
-                        ForEach(onlineImages) { item in
-                            HStack(spacing: 12) {
-                                if let url = item.resolvedURL {
-                                    AsyncImage(url: url) { img in
-                                        img.resizable().scaledToFill()
-                                    } placeholder: {
-                                        ProgressView()
-                                    }
-                                    .frame(width: 64, height: 64)
-                                    .clipped()
-                                    .cornerRadius(8)
-                                }
-                                VStack(alignment: .leading, spacing: 3) {
-                                    Text(item.ketPraPemeriksaan).font(.subheadline.bold())
-                                    if !item.seriBarang.isEmpty {
-                                        Text("Seri: \(item.seriBarang) \(item.ketSeriBarang)").font(.caption).foregroundStyle(.secondary)
-                                    }
-                                }
-                                Spacer()
-                                if !item.id.isEmpty {
-                                    Button(role: .destructive) {
-                                        Task { await deleteOnlinePhoto(item.id) }
-                                    } label: {
-                                        Image(systemName: "trash")
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                Section("Tanda Tangan PJ (PPJK/Importir)") {
-                    TextField("Nama Lengkap PJ", text: $namaPj)
-                    SignaturePadView(store: pjSig)
-                    HStack {
-                        Button("Hapus") { pjSig.clear() }.buttonStyle(.bordered)
-                        Spacer()
-                        Button("Upload TTD PJ") {
-                            Task { await uploadTtdPj() }
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .tint(SiapPalette.navy)
-                        .disabled(isBusyAction)
-                    }
-                }
-
-                Section("Aksi Dokumen") {
-                    Button {
-                        Task { await selesaiPeriksa() }
-                    } label: {
-                        Label("Tandai Selesai Periksa", systemImage: "checkmark.seal.fill")
-                            .frame(maxWidth: .infinity)
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .tint(.green)
-                    .disabled(isBusyAction)
-
-                    Button(role: .destructive) {
-                        Task { await batalPeriksa() }
-                    } label: {
-                        Label("Batalkan Pemeriksaan", systemImage: "xmark.octagon.fill")
-                            .frame(maxWidth: .infinity)
-                    }
-                    .disabled(isBusyAction)
-                }
-            }
-            .navigationTitle("PIB \(pib.noPib)")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button("Tutup") { dismiss() }
-                }
-            }
-            .sheet(item: Binding(
-                get: { pickerSource.map { SourceWrapper(type: $0) } },
-                set: { pickerSource = $0?.type }
-            )) { wrap in
-                ImagePicker(sourceType: wrap.type) { img in
-                    pickedImage = img
-                }
-            }
-            .task {
-                isLcl = pib.isLclDefault
-                if pib.namaPj != "-" { namaPj = pib.namaPj }
-                locationMgr.request()
-                await loadDetail()
-            }
-            .onChange(of: selectedNokon) { _ in
-                Task { await loadPhotos() }
-            }
+        Button(action: action) {
+            Text(title)
+                .font(.system(size: 13, weight: .bold))
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 9)
+                .background(active ? colors.primaryAction : colors.surface)
+                .foregroundStyle(active ? colors.onPrimaryAction : colors.textSecondary)
+                .overlay(RoundedRectangle(cornerRadius: 11, style: .continuous).stroke(active ? Color.clear : colors.cardBorder, lineWidth: 1))
+                .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
         }
-    }
-
-    private struct SourceWrapper: Identifiable {
-        let id = UUID()
-        let type: UIImagePickerController.SourceType
-    }
-
-    private func loadDetail() async {
-        do {
-            dokInfo = try await SiapApiClient.shared.fetchDokumen(kodeTiket: pib.kodeTiket)
-            containers = try await SiapApiClient.shared.fetchContainers(kodeTiket: pib.kodeTiket)
-            if let first = containers.first {
-                selectedNokon = first.noContainer
-                isLcl = false
-            } else {
-                isLcl = true
-            }
-            await loadPhotos()
-        } catch {
-            app.showToast("Gagal memuat detail: \(error.localizedDescription)")
-        }
-    }
-
-    private func loadPhotos() async {
-        do {
-            onlineImages = try await SiapApiClient.shared.fetchImages(
-                kodeTiket: pib.kodeTiket,
-                nokon: isLcl ? "" : selectedNokon
-            )
-        } catch {
-            app.showToast("Gagal memuat galeri: \(error.localizedDescription)")
-        }
-    }
-
-    private func scanOcr(_ img: UIImage) async {
-        if let found = await ContainerOcrScanner.scanContainerNumber(from: img) {
-            if containers.contains(where: { $0.noContainer.uppercased() == found }) {
-                selectedNokon = found
-                isLcl = false
-                app.showToast("Kontainer terdeteksi & dipilih: \(found)")
-            } else {
-                ketSeri = found
-                app.showToast("OCR terbaca: \(found)")
-            }
-        } else {
-            app.showToast("Nomor kontainer tidak terdeteksi pada foto.")
-        }
-    }
-
-    private func uploadPhoto(_ img: UIImage) async {
-        isUploading = true
-        defer { isUploading = false }
-        let waktu = SiapCrypto.currentExifTimestamp()
-        let bulanTahun = SiapCrypto.currentMonthYear()
-        let activeC = containers.first(where: { $0.noContainer == selectedNokon })
-        let filename = SiapCrypto.buildInspectionFileName(
-            kodeTiket: pib.kodeTiket,
-            isLcl: isLcl,
-            nokon: selectedNokon,
-            waktuFoto: waktu,
-            stepLabel: selectedStep.label,
-            stepCode: selectedStep.code,
-            urutanBarang: seriBarang
-        )
-        guard let jpegData = ImageWatermarkProcessor.process(
-            image: img,
-            watermark: useWatermark,
-            noPib: pib.noPib,
-            nokon: isLcl ? "LCL" : selectedNokon,
-            stepLabel: selectedStep.label,
-            lokasi: locationMgr.coordinateText
-        ) else {
-            app.showToast("Gagal memproses gambar.")
-            return
-        }
-
-        do {
-            _ = try await SiapFtpClient.shared.upload(remoteDir: bulanTahun, remoteFilename: filename, data: jpegData)
-            let relUrl = "\(bulanTahun)/\(filename)"
-            _ = try await SiapApiClient.shared.insertImage(
-                isLcl: isLcl,
-                kodeTiket: pib.kodeTiket,
-                nokon: selectedNokon,
-                urlImage: relUrl,
-                stepLabel: selectedStep.label,
-                seriBarang: seriBarang,
-                ketSeriBarang: ketSeri,
-                lokasi: locationMgr.coordinateText,
-                ukuran: activeC?.ukuranContainer ?? "",
-                waktuFoto: waktu,
-                uraianBarang: uraianBarang,
-                jumlahJenisKemasan: jmlKemasan
-            )
-            pickedImage = nil
-            app.showToast("Upload foto berhasil (\(jpegData.count / 1024) KB)!")
-            await loadPhotos()
-        } catch {
-            app.showToast("Upload gagal: \(error.localizedDescription)")
-        }
-    }
-
-    private func deleteOnlinePhoto(_ id: String) async {
-        do {
-            try await SiapApiClient.shared.deleteImage(imageId: id)
-            app.showToast("Foto berhasil dihapus.")
-            await loadPhotos()
-        } catch {
-            app.showToast(error.localizedDescription)
-        }
-    }
-
-    private func uploadTtdPj() async {
-        guard !namaPj.trimmingCharacters(in: .whitespaces).isEmpty else {
-            app.showToast("Isi Nama PJ terlebih dahulu.")
-            return
-        }
-        guard !pjSig.isEmpty else {
-            app.showToast("Silakan gambar tanda tangan PJ.")
-            return
-        }
-        isBusyAction = true
-        defer { isBusyAction = false }
-        let bulanTahun = SiapCrypto.currentMonthYear()
-        let filename = "ttd_pj_\(SiapCrypto.sanitizeToken(pib.kodeTiket))_\(Int(Date().timeIntervalSince1970)).jpg"
-        guard let jpg = pjSig.renderImage().jpegData(compressionQuality: 0.9) else { return }
-        do {
-            _ = try await SiapFtpClient.shared.upload(remoteDir: bulanTahun, remoteFilename: filename, data: jpg)
-            try await SiapApiClient.shared.insertTtdPj(kodeTiket: pib.kodeTiket, namaPj: namaPj, relUrl: "\(bulanTahun)/\(filename)")
-            pjSig.clear()
-            app.showToast("TTD PJ berhasil diunggah!")
-        } catch {
-            app.showToast(error.localizedDescription)
-        }
-    }
-
-    private func selesaiPeriksa() async {
-        isBusyAction = true
-        defer { isBusyAction = false }
-        do {
-            try await SiapApiClient.shared.updateSelesaiPeriksa(kodeTiket: pib.kodeTiket)
-            app.showToast("Status diperbarui: Selesai Periksa!")
-            await app.loadPibs()
-            dismiss()
-        } catch {
-            app.showToast(error.localizedDescription)
-        }
-    }
-
-    private func batalPeriksa() async {
-        isBusyAction = true
-        defer { isBusyAction = false }
-        do {
-            try await SiapApiClient.shared.updateBatalPeriksa(kodeTiket: pib.kodeTiket)
-            app.showToast("Pemeriksaan dibatalkan.")
-            await app.loadPibs()
-            dismiss()
-        } catch {
-            app.showToast(error.localizedDescription)
-        }
+        .buttonStyle(.plain)
     }
 }
 
-// MARK: - Manual Doc Sheet
-
-struct ManualDocSheet: View {
-    @EnvironmentObject var app: AppState
-    @Environment(\.dismiss) private var dismiss
-    @State private var noPib = ""
-    @State private var tglPib = Date()
-    @State private var isSaving = false
-
-    var body: some View {
-        NavigationStack {
-            Form {
-                TextField("Nomor PIB (6 digit)", text: $noPib)
-                    .keyboardType(.numberPad)
-                DatePicker("Tanggal PIB", selection: $tglPib, displayedComponents: .date)
-                Button {
-                    Task { await save() }
-                } label: {
-                    Text(isSaving ? "Menyimpan..." : "Simpan Dokumen Manual")
-                        .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.borderedProminent)
-                .tint(SiapPalette.navy)
-                .disabled(noPib.isEmpty || isSaving)
-            }
-            .navigationTitle("Tambah Dokumen Manual")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) { Button("Tutup") { dismiss() } }
-            }
-        }
-    }
-
-    private func save() async {
-        guard let nip = app.session?.nip else { return }
-        isSaving = true
-        defer { isSaving = false }
-        let df = SiapCrypto.wibFormatter("yyyy-MM-dd")
-        do {
-            try await SiapApiClient.shared.insertDokManual(nip: nip, noPib: noPib, tglPib: df.string(from: tglPib))
-            app.showToast("Dokumen manual ditambahkan!")
-            await app.loadPibs()
-            dismiss()
-        } catch {
-            app.showToast(error.localizedDescription)
-        }
-    }
-}
-
-// MARK: - Tab 4: TPS Monitoring
+// MARK: - Tab 4: TPS Monitoring Hub (Matches TpsMonitoringScreensKt)
 
 struct TpsTabView: View {
     @EnvironmentObject var app: AppState
+    let colors: SiapColors
+
     @State private var source: TpsSource = .graha
-    @State private var searchText = ""
-    @State private var onlyMine = false
     @State private var items: [TpsMonitorItem] = []
     @State private var isLoading = false
+    @State private var onlyMyTasks = false
+    @State private var searchText = ""
+
+    private var myTaskCount: Int { items.filter(\.isMyTask).count }
 
     private var filtered: [TpsMonitorItem] {
         let q = searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        return items.filter { item in
-            if onlyMine && !item.isMyTask { return false }
-            guard !q.isEmpty else { return true }
-            return item.container.lowercased().contains(q)
-                || item.pib.lowercased().contains(q)
-                || item.importir.lowercased().contains(q)
-                || item.summary.lowercased().contains(q)
+        return items.filter { it in
+            if onlyMyTasks && !it.isMyTask { return false }
+            if q.isEmpty { return true }
+            return it.container.lowercased().contains(q)
+                || it.pib.lowercased().contains(q)
+                || it.importir.lowercased().contains(q)
+                || it.summary.lowercased().contains(q)
         }
     }
 
     var body: some View {
-        NavigationStack {
-            VStack(spacing: 0) {
-                Picker("Sumber TPS", selection: $source) {
-                    ForEach(TpsSource.allCases) { s in
-                        Text(s.rawValue).tag(s)
+        VStack(spacing: 0) {
+            // Compact TPS Ribbon Bar (GRAHA | NPCT1 | TPSL)
+            HStack(spacing: 6) {
+                ForEach(TpsSource.allCases) { s in
+                    let active = source == s
+                    Button {
+                        source = s
+                    } label: {
+                        Text(s.rawValue)
+                            .font(.system(size: 12.5, weight: .heavy, design: .rounded))
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 8)
+                            .background(active ? colors.primaryAction : colors.surfaceElevated)
+                            .foregroundStyle(active ? colors.onPrimaryAction : colors.textSecondary)
+                            .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
                     }
+                    .buttonStyle(.plain)
                 }
-                .pickerStyle(.segmented)
-                .padding(.horizontal)
-                .padding(.top, 8)
-                .onChange(of: source) { _ in Task { await load() } }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .background(colors.surface)
+            .overlay(alignment: .bottom) {
+                Rectangle().fill(colors.divider).frame(height: 0.75)
+            }
 
-                HStack {
-                    Toggle("Hanya Tugas Saya", isOn: $onlyMine)
-                        .font(.caption.weight(.semibold))
-                        .tint(SiapPalette.navy)
-                    Spacer()
-                    Text("\(filtered.count) data")
-                        .font(.caption.monospacedDigit())
-                        .foregroundStyle(.secondary)
-                }
-                .padding(.horizontal)
-                .padding(.vertical, 6)
+            ScrollView {
+                LazyVStack(spacing: 9) {
+                    // Search + Tugas Saya ★ + Refresh
+                    HStack(spacing: 7) {
+                        HStack(spacing: 6) {
+                            Image(systemName: "magnifyingglass").foregroundStyle(colors.textHint)
+                            TextField("Cari Kontainer / PIB...", text: $searchText)
+                                .font(.system(size: 13))
+                                .foregroundStyle(colors.textPrimary)
+                                .textInputAutocapitalization(.never)
+                                .autocorrectionDisabled()
+                        }
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 9)
+                        .background(colors.surface)
+                        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(colors.cardBorder, lineWidth: 1))
+                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
 
-                List {
+                        Button {
+                            onlyMyTasks.toggle()
+                        } label: {
+                            HStack(spacing: 4) {
+                                Image(systemName: onlyMyTasks ? "star.fill" : "star")
+                                Text("Tugas (\(myTaskCount))")
+                            }
+                            .font(.system(size: 11.5, weight: .bold))
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 9)
+                            .background(onlyMyTasks ? colors.myTaskBg : colors.surface)
+                            .foregroundStyle(onlyMyTasks ? colors.myTaskText : colors.textSecondary)
+                            .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(onlyMyTasks ? colors.myTaskBorder : colors.cardBorder, lineWidth: 1))
+                            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                        }
+                        .buttonStyle(.plain)
+
+                        Button {
+                            Task { await load() }
+                        } label: {
+                            Image(systemName: "arrow.clockwise")
+                                .font(.system(size: 14, weight: .bold))
+                                .foregroundStyle(colors.primaryAction)
+                                .padding(9)
+                                .background(colors.surface)
+                                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.top, 10)
+
+                    HStack {
+                        Text("Tot: \(filtered.count) kontainer")
+                            .font(.system(size: 11.5, weight: .semibold))
+                            .foregroundStyle(colors.textHint)
+                        Spacer()
+                    }
+                    .padding(.horizontal, 14)
+
                     if isLoading {
-                        ProgressView("Mengambil antrean \(source.rawValue)...")
-                            .frame(maxWidth: .infinity, alignment: .center)
+                        ProgressView("Memuat \(source.rawValue)...").tint(colors.primaryAction).padding(.top, 36)
                     } else if filtered.isEmpty {
-                        Text("Tidak ada data antrean.").foregroundStyle(.secondary)
+                        Text("Tidak ada data antrian di \(source.rawValue).")
+                            .font(.system(size: 13.5))
+                            .foregroundStyle(colors.textHint)
+                            .padding(.top, 36)
                     } else {
                         ForEach(filtered) { item in
-                            VStack(alignment: .leading, spacing: 4) {
+                            VStack(alignment: .leading, spacing: 6) {
                                 HStack {
-                                    Text(item.container).font(.headline.monospaced())
+                                    if item.isMyTask {
+                                        Image(systemName: "star.fill")
+                                            .font(.system(size: 12))
+                                            .foregroundStyle(SiapColors.brandAmber)
+                                    }
+                                    Text(item.container)
+                                        .font(.system(size: 14.5, weight: .heavy, design: .monospaced))
+                                        .foregroundStyle(item.isMyTask ? colors.myTaskText : colors.textPrimary)
                                     Spacer()
-                                    Text(item.isMyTask ? "Tugas Saya" : item.source)
-                                        .font(.caption2.bold())
-                                        .padding(.horizontal, 8)
-                                        .padding(.vertical, 3)
-                                        .background(item.isMyTask ? Color.green.opacity(0.2) : SiapPalette.navy.opacity(0.15))
-                                        .foregroundStyle(item.isMyTask ? .green : SiapPalette.navy)
-                                        .clipShape(Capsule())
+                                    if !item.pib.isEmpty {
+                                        Text("PIB \(item.pib)")
+                                            .font(.system(size: 11.5, weight: .bold, design: .monospaced))
+                                            .padding(.horizontal, 7)
+                                            .padding(.vertical, 3)
+                                            .background(colors.primaryContainer)
+                                            .foregroundStyle(colors.onPrimaryContainer)
+                                            .clipShape(Capsule())
+                                    }
                                 }
+
                                 if !item.importir.isEmpty {
-                                    Text(item.importir).font(.subheadline.weight(.medium))
+                                    Text(item.importir)
+                                        .font(.system(size: 12.5, weight: .bold))
+                                        .foregroundStyle(colors.textPrimary)
+                                        .lineLimit(1)
                                 }
-                                Text(item.summary).font(.caption).foregroundStyle(.secondary)
+
+                                Text(item.summary)
+                                    .font(.system(size: 11.5))
+                                    .foregroundStyle(colors.textSecondary)
+                                    .lineLimit(2)
                             }
-                            .padding(.vertical, 3)
+                            .padding(12)
+                            .background(item.isMyTask ? colors.myTaskBg : colors.surface)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 13, style: .continuous)
+                                    .stroke(item.isMyTask ? colors.myTaskBorder : colors.cardBorder, lineWidth: item.isMyTask ? 1.4 : 1)
+                            )
+                            .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
+                            .padding(.horizontal, 12)
                         }
                     }
                 }
-                .searchable(text: $searchText, prompt: "Filter Kontainer / PIB / Importir")
-                .refreshable { await load() }
+                .padding(.bottom, 18)
             }
-            .navigationTitle("Monitoring TPS")
-            .task {
-                if items.isEmpty { await load() }
-            }
+            .refreshable { await load() }
         }
+        .onChange(of: source) { _ in Task { await load() } }
+        .task { await load() }
     }
 
     private func load() async {
         isLoading = true
         defer { isLoading = false }
-        let myPibs = Set(app.pibs.map { String($0.noPib.drop(while: { $0 == "0" })) }.filter { !$0.isEmpty })
-        let myConts = Set(app.lorongItems.map { $0.noContainer.uppercased() }.filter { !$0.isEmpty && $0 != "-" })
+        let myPibs = Set(app.pibs.map { String($0.noPib.drop(while: { $0 == "0" })) })
+        let myConts = Set(app.lorongItems.map { $0.noContainer.uppercased() })
         do {
             items = try await SiapApiClient.shared.fetchTps(source: source, myPibs: myPibs, myContainers: myConts)
         } catch {
@@ -1414,155 +2485,258 @@ struct TpsTabView: View {
     }
 }
 
-// MARK: - Tab 5: User Profile, Diagnostics & TTD PPF
+// MARK: - Tab 5: Profil & Pengaturan (Matches Android UserScreenKt)
 
 struct UserTabView: View {
     @EnvironmentObject var app: AppState
-    @StateObject private var ppfSig = SignatureStrokeStore()
-    @State private var waPhone = ""
-    @State private var waMsg = "Selamat pagi/siang, mohon kesiapan pemeriksaan fisik untuk PIB/Kontainer terkait di lokasi TPS. Terima kasih."
-    @State private var isUploading = false
+    let colors: SiapColors
+
+    @StateObject private var ttdStore = SignatureStrokeStore()
+    @State private var isUploadingTtd = false
+    @State private var isTestingDiag = false
     @State private var diagResults: [(String, Bool, String)] = []
-    @State private var isCheckingDiag = false
+    @State private var showLogoutConfirm = false
 
     var body: some View {
-        NavigationStack {
-            Form {
-                if let sess = app.session {
-                    Section {
-                        VStack(alignment: .leading, spacing: 6) {
-                            Text(sess.displayName)
-                                .font(.title3.bold())
-                                .foregroundStyle(.white)
-                            Text("NIP: \(sess.nip)")
-                                .font(.subheadline.monospaced())
-                                .foregroundStyle(Color.white.opacity(0.9))
-                            if !sess.jabatan.isEmpty {
-                                Text(sess.jabatan)
-                                    .font(.caption)
-                                    .foregroundStyle(SiapPalette.amber)
-                            }
-                            if !sess.usernameEmail.isEmpty {
-                                Text(sess.usernameEmail)
-                                    .font(.caption)
-                                    .foregroundStyle(Color.white.opacity(0.8))
-                            }
-                            if !sess.phoneNumber.isEmpty {
-                                Text("HP: \(sess.phoneNumber)")
-                                    .font(.caption)
-                                    .foregroundStyle(Color.white.opacity(0.8))
+        ScrollView {
+            VStack(spacing: 14) {
+                // Hero Profile Card (SiapCardBrush)
+                HStack(spacing: 14) {
+                    SiapUserAvatarBadge(session: app.session, size: 62)
+
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(app.session?.displayName ?? "-")
+                            .font(.system(size: 16.5, weight: .heavy))
+                            .foregroundStyle(.white)
+                            .lineLimit(2)
+                        Text("NIP \(app.session?.nip ?? "-")")
+                            .font(.system(size: 12.5, design: .monospaced))
+                            .foregroundStyle(SiapColors.brandAmber)
+                        if let jab = app.session?.jabatan, !jab.isEmpty {
+                            Text(jab)
+                                .font(.system(size: 12))
+                                .foregroundStyle(SiapColors.hintOnNavy)
+                        }
+                        if let email = app.session?.usernameEmail, !email.isEmpty {
+                            Text(email)
+                                .font(.system(size: 11.5))
+                                .foregroundStyle(Color.white.opacity(0.75))
+                        }
+                    }
+                    Spacer()
+                }
+                .padding(16)
+                .background(colors.cardGradient)
+                .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).stroke(Color.white.opacity(0.12), lineWidth: 1))
+                .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                .padding(.horizontal, 12)
+                .padding(.top, 10)
+
+                // Theme & UI Density Card (Matches Android ThemeOptionChip + UiDensityOptionChip)
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("Tampilan & Tema")
+                        .font(.system(size: 14.5, weight: .bold))
+                        .foregroundStyle(colors.textPrimary)
+
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Mode Tema").font(.system(size: 12)).foregroundStyle(colors.textHint)
+                        HStack(spacing: 8) {
+                            ForEach(SiapThemeMode.allCases) { mode in
+                                let active = app.themeMode == mode
+                                Button {
+                                    app.themeMode = mode
+                                } label: {
+                                    Text(mode.label)
+                                        .font(.system(size: 12.5, weight: .bold))
+                                        .frame(maxWidth: .infinity)
+                                        .padding(.vertical, 9)
+                                        .background(active ? colors.primaryAction : colors.surfaceElevated)
+                                        .foregroundStyle(active ? colors.onPrimaryAction : colors.textPrimary)
+                                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                                }
+                                .buttonStyle(.plain)
                             }
                         }
-                        .padding(.vertical, 8)
                     }
-                    .listRowBackground(SiapPalette.headerGradient)
-                }
 
-                Section("Tanda Tangan PPF (ttd_ppf/<NIP>.png)") {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Kepadatan Kartu").font(.system(size: 12)).foregroundStyle(colors.textHint)
+                        HStack(spacing: 8) {
+                            ForEach(SiapUiDensity.allCases) { d in
+                                let active = app.uiDensity == d
+                                Button {
+                                    app.uiDensity = d
+                                } label: {
+                                    Text(d.label)
+                                        .font(.system(size: 12.5, weight: .bold))
+                                        .frame(maxWidth: .infinity)
+                                        .padding(.vertical, 9)
+                                        .background(active ? colors.primaryAction : colors.surfaceElevated)
+                                        .foregroundStyle(active ? colors.onPrimaryAction : colors.textPrimary)
+                                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
+                    }
+                }
+                .padding(14)
+                .background(colors.surface)
+                .overlay(RoundedRectangle(cornerRadius: 15, style: .continuous).stroke(colors.cardBorder, lineWidth: 1))
+                .clipShape(RoundedRectangle(cornerRadius: 15, style: .continuous))
+                .padding(.horizontal, 12)
+
+                // TTD Pemeriksa (PPF) Card
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Tanda Tangan Pemeriksa (TTD PPF)")
+                        .font(.system(size: 14.5, weight: .bold))
+                        .foregroundStyle(colors.textPrimary)
+
                     if let nip = app.session?.nip, !nip.isEmpty,
                        let url = URL(string: "\(SiapCrypto.ttdPpfAssetsBase)/\(SiapCrypto.sanitizeToken(nip)).png") {
-                        HStack {
-                            Text("TTD Tersimpan:").font(.caption).foregroundStyle(.secondary)
-                            Spacer()
-                            AsyncImage(url: url) { img in
-                                img.resizable().scaledToFit().frame(height: 50)
-                            } placeholder: {
-                                Text("-").font(.caption).foregroundStyle(.secondary)
+                        AsyncImage(url: url) { phase in
+                            if let img = phase.image {
+                                img.resizable().scaledToFit()
+                                    .frame(maxHeight: 80)
+                                    .frame(maxWidth: .infinity)
+                                    .padding(8)
+                                    .background(Color.white)
+                                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
                             }
                         }
                     }
-                    SignaturePadView(store: ppfSig)
+
+                    SignaturePadView(store: ttdStore)
+                        .frame(height: 150)
+                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).stroke(colors.cardBorder, lineWidth: 1))
+
+                    HStack(spacing: 10) {
+                        SiapOutlinedButton("Hapus", icon: "eraser.fill", color: colors.danger) {
+                            ttdStore.clear()
+                        }
+                        .frame(width: 110)
+
+                        SiapFilledButton(
+                            isUploadingTtd ? "Mengunggah..." : "Simpan TTD PPF",
+                            icon: "signature",
+                            bg: colors.primaryAction,
+                            fg: colors.onPrimaryAction,
+                            isLoading: isUploadingTtd
+                        ) {
+                            Task { await uploadTtdPpf() }
+                        }
+                        .disabled(isUploadingTtd)
+                    }
+                }
+                .padding(14)
+                .background(colors.surface)
+                .overlay(RoundedRectangle(cornerRadius: 15, style: .continuous).stroke(colors.cardBorder, lineWidth: 1))
+                .clipShape(RoundedRectangle(cornerRadius: 15, style: .continuous))
+                .padding(.horizontal, 12)
+
+                // Diagnostik Server Card
+                VStack(alignment: .leading, spacing: 10) {
                     HStack {
-                        Button("Hapus") { ppfSig.clear() }.buttonStyle(.bordered)
+                        Text("Diagnostik Koneksi")
+                            .font(.system(size: 14.5, weight: .bold))
+                            .foregroundStyle(colors.textPrimary)
                         Spacer()
-                        Button(isUploading ? "Mengunggah..." : "Upload TTD PPF") {
-                            Task { await uploadPpf() }
+                        Button {
+                            Task { await runDiagnostics() }
+                        } label: {
+                            Text(isTestingDiag ? "Menguji..." : "Uji Server")
+                                .font(.system(size: 12, weight: .bold))
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 5)
+                                .background(colors.primaryContainer)
+                                .foregroundStyle(colors.onPrimaryContainer)
+                                .clipShape(Capsule())
                         }
-                        .buttonStyle(.borderedProminent)
-                        .tint(SiapPalette.navy)
-                        .disabled(isUploading)
+                        .buttonStyle(.plain)
+                        .disabled(isTestingDiag)
                     }
-                }
 
-                Section("Diagnostik Koneksi Server") {
-                    Button {
-                        Task { await runDiagnostics() }
-                    } label: {
-                        HStack {
-                            if isCheckingDiag { ProgressView() }
-                            Label(isCheckingDiag ? "Memeriksa..." : "Cek Koneksi SIAP & TPS", systemImage: "network")
-                        }
-                    }
-                    ForEach(diagResults, id: \.0) { name, ok, detail in
-                        HStack {
-                            Image(systemName: ok ? "checkmark.circle.fill" : "xmark.circle.fill")
-                                .foregroundStyle(ok ? .green : .red)
-                            Text(name).font(.subheadline)
-                            Spacer()
-                            Text(detail).font(.caption).foregroundStyle(.secondary)
+                    if !diagResults.isEmpty {
+                        ForEach(diagResults, id: \.0) { name, ok, detail in
+                            HStack {
+                                Image(systemName: ok ? "checkmark.circle.fill" : "xmark.circle.fill")
+                                    .foregroundStyle(ok ? colors.success : colors.danger)
+                                Text(name)
+                                    .font(.system(size: 13, weight: .semibold))
+                                    .foregroundStyle(colors.textPrimary)
+                                Spacer()
+                                Text(detail)
+                                    .font(.system(size: 11.5, design: .monospaced))
+                                    .foregroundStyle(colors.textSecondary)
+                            }
                         }
                     }
                 }
+                .padding(14)
+                .background(colors.surface)
+                .overlay(RoundedRectangle(cornerRadius: 15, style: .continuous).stroke(colors.cardBorder, lineWidth: 1))
+                .clipShape(RoundedRectangle(cornerRadius: 15, style: .continuous))
+                .padding(.horizontal, 12)
 
-                Section("WhatsApp Cepat") {
-                    TextField("Nomor WA (mis. 62812...)", text: $waPhone)
-                        .keyboardType(.phonePad)
-                    TextEditor(text: $waMsg)
-                        .frame(height: 75)
-                    Button {
-                        app.openWhatsApp(phone: waPhone, message: waMsg)
-                    } label: {
-                        Label("Buka di WhatsApp", systemImage: "message.fill")
-                            .frame(maxWidth: .infinity)
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .tint(.green)
+                // Logout Button
+                SiapOutlinedButton(
+                    "Keluar Akun SIAP NEO",
+                    icon: "rectangle.portrait.and.arrow.right",
+                    color: colors.danger,
+                    bg: colors.danger.opacity(0.1)
+                ) {
+                    showLogoutConfirm = true
                 }
+                .padding(.horizontal, 12)
 
-                Section {
-                    Button(role: .destructive) {
-                        app.logout()
-                    } label: {
-                        Text("Keluar (Logout)").frame(maxWidth: .infinity)
-                    }
-                }
+                Text("SIAP NEO iOS Native v1.19.2 • KPU BC Tipe A Tanjung Priok")
+                    .font(.system(size: 11))
+                    .foregroundStyle(colors.textHint)
+                    .padding(.bottom, 14)
             }
-            .navigationTitle("Akun")
+        }
+        .alert("Keluar Akun?", isPresented: $showLogoutConfirm) {
+            Button("Batal", role: .cancel) {}
+            Button("Keluar", role: .destructive) { app.logout() }
+        } message: {
+            Text("Anda yakin ingin keluar dari akun SIAP NEO?")
+        }
+    }
+
+    private func uploadTtdPpf() async {
+        guard let nip = app.session?.nip, !nip.isEmpty else { return }
+        guard !ttdStore.strokes.isEmpty else {
+            app.showToast("Silakan tanda tangan terlebih dahulu")
+            return
+        }
+        isUploadingTtd = true
+        defer { isUploadingTtd = false }
+        let fileName = "\(SiapCrypto.sanitizeToken(nip)).png"
+        guard let pngData = ttdStore.renderImage().pngData() else { return }
+        do {
+            _ = try await SiapFtpClient.shared.upload(remoteDir: "ttd_ppf", remoteFilename: fileName, data: pngData)
+            try await SiapApiClient.shared.insertTtdPpf(nip: nip)
+            app.showToast("TTD Pemeriksa berhasil disimpan!")
+        } catch {
+            app.showToast("Gagal simpan TTD PPF: \(error.localizedDescription)")
         }
     }
 
     private func runDiagnostics() async {
-        isCheckingDiag = true
-        defer { isCheckingDiag = false }
-        let targets = [
+        isTestingDiag = true
+        defer { isTestingDiag = false }
+        let targets: [(String, String)] = [
             ("SIAP FB API", "https://bcpriok.net/siap/siapfb/"),
-            ("SIAP 3.0 Web", "https://bcpriok.net/siap3.0/"),
-            ("Graha TPS", "http://103.130.242.88/tpft/MON_SIAP_PERIKSA/")
+            ("SIAP 3.0", "https://bcpriok.net/siap3.0/auth/login"),
+            ("TPS Graha", "http://103.130.242.88/tpft/MON_SIAP_PERIKSA/"),
+            ("TPS NPCT1", "https://bos.multiterminal.co.id/tpk_ipc/cgis/application.php/display/list_antrian")
         ]
         var res: [(String, Bool, String)] = []
-        for (label, url) in targets {
-            let (ok, info) = await SiapApiClient.shared.pingEndpoint(url)
-            res.append((label, ok, info))
+        for (name, url) in targets {
+            let (ok, detail) = await SiapApiClient.shared.pingEndpoint(url)
+            res.append((name, ok, detail))
         }
         diagResults = res
-    }
-
-    private func uploadPpf() async {
-        guard let nip = app.session?.nip else { return }
-        guard !ppfSig.isEmpty else {
-            app.showToast("Silakan gambar tanda tangan PPF.")
-            return
-        }
-        isUploading = true
-        defer { isUploading = false }
-        guard let png = ppfSig.renderImage().pngData() else { return }
-        let filename = "\(SiapCrypto.sanitizeToken(nip)).png"
-        do {
-            _ = try await SiapFtpClient.shared.upload(remoteDir: "ttd_ppf", remoteFilename: filename, data: png)
-            try await SiapApiClient.shared.insertTtdPpf(nip: nip)
-            app.showToast("TTD PPF berhasil diunggah (\(filename))!")
-        } catch {
-            app.showToast(error.localizedDescription)
-        }
     }
 }

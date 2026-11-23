@@ -181,6 +181,7 @@ enum HomeStatusFilter: String, CaseIterable, Identifiable {
     case siap = "Siap"
     case sedang = "Sedang"
     case selesai = "Selesai"
+    case atensi = "Atensi"
 
     var id: String { rawValue }
 }
