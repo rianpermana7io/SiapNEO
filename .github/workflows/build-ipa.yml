@@ -14,6 +14,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 10
 
       - name: Install XcodeGen
         run: brew install xcodegen
@@ -50,17 +52,40 @@ jobs:
           path: SIAPNeo-iOS.ipa
           retention-days: 30
 
-      - name: Publish Direct Release IPA
+      - name: Publish Direct Release IPA & Update Manifest
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           VER=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" Resources/Info.plist)
           BUILD=$(/usr/libexec/PlistBuddy -c "Print :CFBundleVersion" Resources/Info.plist)
+          SIZE=$(stat -f%z SIAPNeo-iOS.ipa)
+          PUB_AT=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
           TITLE="SIAP NEO iOS v${VER} (${BUILD})"
-          NOTES="VERSION=${VER} BUILD=${BUILD} - Automated macos-15 release build"
+          CHANGELOG=$(git log -n 5 --pretty=format:"- %s")
+
+          python3 - "$VER" "$BUILD" "$SIZE" "$PUB_AT" "$CHANGELOG" << 'PYEOF'
+          import json, sys
+          ver, build, size, pub_at, changelog = sys.argv[1:6]
+          manifest = {
+              "version": ver,
+              "build": int(build),
+              "ipa_url": "https://github.com/rianpermana7io/SiapNEO/releases/download/latest/SIAPNeo-iOS.ipa",
+              "ipa_size_bytes": int(size),
+              "published_at": pub_at,
+              "mandatory": False,
+              "changelog": changelog
+          }
+          with open("update-manifest.json", "w", encoding="utf-8") as f:
+              json.dump(manifest, f, ensure_ascii=False, indent=2)
+          PYEOF
+
+          NOTES="VERSION=${VER} BUILD=${BUILD}
+
+          ${CHANGELOG}"
+
           if gh release view latest >/dev/null 2>&1; then
             gh release edit latest --title "${TITLE}" --notes "${NOTES}"
-            gh release upload latest SIAPNeo-iOS.ipa --clobber
+            gh release upload latest SIAPNeo-iOS.ipa update-manifest.json --clobber
           else
-            gh release create latest SIAPNeo-iOS.ipa --title "${TITLE}" --notes "${NOTES}"
+            gh release create latest SIAPNeo-iOS.ipa update-manifest.json --title "${TITLE}" --notes "${NOTES}"
           fi

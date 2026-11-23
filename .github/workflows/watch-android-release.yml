@@ -1,0 +1,73 @@
+name: Watch Upstream Android SIAP NEO Releases
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+
+permissions:
+  issues: write
+  contents: read
+
+jobs:
+  check-upstream:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Compare upstream fiqri1010/SIAP-NEO with iOS version
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python3 - << 'PYEOF'
+          import json, os, re, subprocess, urllib.request
+
+          plist_text = open("Resources/Info.plist", encoding="utf-8").read()
+          m = re.search(r"<key>CFBundleShortVersionString</key>\s*<string>([^<]+)</string>", plist_text)
+          ios_ver = m.group(1).strip() if m else "0.0.0"
+
+          req = urllib.request.Request(
+              "https://api.github.com/repos/fiqri1010/SIAP-NEO/releases/latest",
+              headers={"User-Agent": "SIAPNeo-iOS-Upstream-Watcher"}
+          )
+          try:
+              with urllib.request.urlopen(req, timeout=20) as resp:
+                  rel = json.loads(resp.read().decode("utf-8"))
+          except Exception as e:
+              print("Could not query upstream repo (may be private or rate-limited):", e)
+              raise SystemExit(0)
+
+          tag = rel.get("tag_name") or rel.get("name") or ""
+          body = rel.get("body") or ""
+          html_url = rel.get("html_url") or "https://github.com/fiqri1010/SIAP-NEO/releases"
+          vm = re.search(r"(\d+\.\d+\.\d+)", f"{tag} {rel.get('name', '')}")
+          android_ver = vm.group(1) if vm else ""
+          print(f"iOS local version: {ios_ver} | Upstream Android version: {android_ver} (tag={tag})")
+
+          def parse_ver(v):
+              return tuple(int(x) for x in v.split(".")) if v else (0, 0, 0)
+
+          if not android_ver or parse_ver(android_ver) <= parse_ver(ios_ver):
+              print("iOS is up to date with upstream Android release.")
+              raise SystemExit(0)
+
+          title = f"Upstream Android SIAP NEO v{android_ver} tersedia"
+          existing = subprocess.check_output(
+              ["gh", "issue", "list", "--state", "open", "--search", title, "--json", "number,title"],
+              text=True
+          )
+          issues = json.loads(existing)
+          if any(i.get("title") == title for i in issues):
+              print("Issue already exists for", title)
+              raise SystemExit(0)
+
+          issue_body = (
+              f"Rilis baru upstream Android **fiqri1010/SIAP-NEO** terdeteksi: **{tag}** (`v{android_ver}`)\n"
+              f"Versi iOS saat ini: `v{ios_ver}`\n\n"
+              f"Link rilis: {html_url}\n\n"
+              f"### Catatan Rilis Android\n{body[:3000]}"
+          )
+          subprocess.check_call(["gh", "issue", "create", "--title", title, "--body", issue_body])
+          print("Created tracking issue:", title)
+          PYEOF

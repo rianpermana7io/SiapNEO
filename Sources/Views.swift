@@ -50,7 +50,12 @@ final class AppState: ObservableObject {
     @Published var pendingBrowseAutoExpand = false
     @Published var browseReturnToTps = false
     @Published var availableUpdate: AppUpdateInfo?
+    @Published var showUpdatePromptSheet = false
     @Published var isCheckingUpdate = false
+    @Published var lastUpdateCheckText: String = ""
+    @Published var autoCheckUpdates: Bool {
+        didSet { UserDefaults.standard.set(autoCheckUpdates, forKey: autoCheckUpdatesKey) }
+    }
     @Published var barconSheetTarget: BarconFormTarget?
     @Published var submittedBarconKeys: Set<String> = []
 
@@ -66,6 +71,10 @@ final class AppState: ObservableObject {
     private let rememberedUserKey = "siapneo_ios_remembered_user"
     private let themeModeKey = "siapneo_ios_theme_mode"
     private let densityKey = "siapneo_ios_ui_density"
+    private let autoCheckUpdatesKey = "siapneo_ios_auto_check_updates"
+    private let snoozedUpdateBuildKey = "siapneo_ios_snoozed_update_build"
+    private let lastRunBuildKey = "siapneo_ios_last_run_build"
+    private var lastAutoCheckAt: Date = .distantPast
 
     var rememberedUsername: String {
         get { UserDefaults.standard.string(forKey: rememberedUserKey) ?? "" }
@@ -79,6 +88,11 @@ final class AppState: ObservableObject {
         self.themeMode = SiapThemeMode(rawValue: savedTheme) ?? .system
         let savedDensity = UserDefaults.standard.string(forKey: "siapneo_ios_ui_density") ?? "STANDARD"
         self.uiDensity = SiapUiDensity(rawValue: savedDensity) ?? .standard
+        if UserDefaults.standard.object(forKey: "siapneo_ios_auto_check_updates") == nil {
+            self.autoCheckUpdates = true
+        } else {
+            self.autoCheckUpdates = UserDefaults.standard.bool(forKey: "siapneo_ios_auto_check_updates")
+        }
         let savedBarcons = UserDefaults.standard.stringArray(forKey: "siapneo_submitted_barcons") ?? []
         self.submittedBarconKeys = Set(savedBarcons)
 
@@ -87,6 +101,14 @@ final class AppState: ObservableObject {
            !saved.nip.isEmpty {
             self.session = saved
         }
+
+        let prevBuild = UserDefaults.standard.integer(forKey: lastRunBuildKey)
+        let nowBuild = Int((Bundle.main.infoDictionary?["CFBundleVersion"] as? String) ?? "147") ?? 147
+        if prevBuild > 0 && nowBuild > prevBuild {
+            let ver = (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "1.19.7"
+            self.toastMessage = "SIAP NEO berhasil diperbarui ke v\(ver)!"
+        }
+        UserDefaults.standard.set(nowBuild, forKey: lastRunBuildKey)
     }
 
     func navigateBack() {
@@ -200,35 +222,79 @@ final class AppState: ObservableObject {
     }
 
     var currentAppVersion: String {
-        (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "1.19.5"
+        (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "1.19.7"
     }
 
     var currentAppBuild: Int {
-        Int((Bundle.main.infoDictionary?["CFBundleVersion"] as? String) ?? "145") ?? 145
+        Int((Bundle.main.infoDictionary?["CFBundleVersion"] as? String) ?? "147") ?? 147
     }
 
-    func checkForAppUpdate(silent: Bool) async {
-        isCheckingUpdate = true
-        defer { isCheckingUpdate = false }
-        guard let info = await SiapApiClient.shared.checkLatestReleaseUpdate() else {
-            if !silent { showToast("Gagal memeriksa pembaruan dari GitHub") }
+    var isTrollStoreUrlSchemeReady: Bool {
+        guard let url = URL(string: "apple-magnifier://") else { return false }
+        return UIApplication.shared.canOpenURL(url)
+    }
+
+    func checkForAppUpdate(silent: Bool, force: Bool = false) async {
+        if silent && !autoCheckUpdates { return }
+        if silent && !force && Date().timeIntervalSince(lastAutoCheckAt) < 900 {
             return
         }
-        if info.remoteBuild > currentAppBuild || (!info.remoteVersion.isEmpty && info.remoteVersion != currentAppVersion && info.remoteBuild >= currentAppBuild) {
+        if isCheckingUpdate { return }
+        isCheckingUpdate = true
+        defer { isCheckingUpdate = false }
+        lastAutoCheckAt = Date()
+
+        guard let info = await SiapApiClient.shared.checkLatestReleaseUpdate() else {
+            if !silent { showToast("Gagal memeriksa pembaruan dari server update") }
+            return
+        }
+        let df = SiapCrypto.wibFormatter("HH:mm")
+        lastUpdateCheckText = "Dicek \(df.string(from: Date())) WIB"
+
+        let isNewer = SiapApiClient.shared.isVersionNewer(
+            remoteVersion: info.remoteVersion,
+            remoteBuild: info.remoteBuild,
+            localVersion: currentAppVersion,
+            localBuild: currentAppBuild
+        )
+        if isNewer {
             availableUpdate = info
-            if !silent { showToast("Pembaruan v\(info.remoteVersion) (\(info.remoteBuild)) tersedia!") }
+            let snoozedBuild = UserDefaults.standard.integer(forKey: snoozedUpdateBuildKey)
+            if !silent || info.mandatory || snoozedBuild != info.remoteBuild {
+                showUpdatePromptSheet = true
+            }
+            if !silent {
+                showToast("Pembaruan v\(info.remoteVersion) (\(info.remoteBuild)) tersedia!")
+            }
         } else {
             availableUpdate = nil
+            showUpdatePromptSheet = false
             if !silent { showToast("SIAP NEO sudah versi terbaru (v\(currentAppVersion))") }
         }
     }
 
+    func dismissUpdatePrompt(snoozeBuild: Bool) {
+        if snoozeBuild, let upd = availableUpdate {
+            UserDefaults.standard.set(upd.remoteBuild, forKey: snoozedUpdateBuildKey)
+        }
+        showUpdatePromptSheet = false
+    }
+
     func triggerTrollStoreUpdate(_ info: AppUpdateInfo) {
+        showUpdatePromptSheet = false
         let encoded = info.ipaDownloadUrl.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? info.ipaDownloadUrl
         if let trollUrl = URL(string: "apple-magnifier://install?url=\(encoded)"),
            UIApplication.shared.canOpenURL(trollUrl) {
             UIApplication.shared.open(trollUrl)
         } else if let directUrl = URL(string: info.ipaDownloadUrl) {
+            showToast("URL Scheme TrollStore belum aktif — membuka unduhan Safari")
+            UIApplication.shared.open(directUrl)
+        }
+    }
+
+    func openDirectIpaDownload(_ info: AppUpdateInfo) {
+        showUpdatePromptSheet = false
+        if let directUrl = URL(string: info.ipaDownloadUrl) {
             UIApplication.shared.open(directUrl)
         }
     }
@@ -381,7 +447,7 @@ struct LoginView: View {
                             .font(.system(size: 13.5, weight: .medium))
                             .foregroundStyle(SiapColors.hintOnNavy)
 
-                        Text("Sistem Informasi Pemeriksaan Fisik • v1.19.6")
+                        Text("Sistem Informasi Pemeriksaan Fisik • v1.19.7")
                             .font(.system(size: 11, weight: .bold))
                             .padding(.horizontal, 12)
                             .padding(.vertical, 5)
@@ -4499,10 +4565,10 @@ struct UserTabView: View {
                 .clipShape(RoundedRectangle(cornerRadius: 15, style: .continuous))
                 .padding(.horizontal, 12)
 
-                // Pembaruan Otomatis (TrollStore 1-Tap Updater)
+                // Pembaruan Otomatis (TrollStore 1-Tap Updater — Mirror Android AppUpdater)
                 VStack(alignment: .leading, spacing: 10) {
                     HStack {
-                        Text("Pembaruan Aplikasi (Auto-Update)")
+                        Text("Pembaruan Otomatis")
                             .font(.system(size: 14.5, weight: .bold))
                             .foregroundStyle(colors.textPrimary)
                         Spacer()
@@ -4510,33 +4576,67 @@ struct UserTabView: View {
                             .font(.system(size: 11.5, weight: .bold, design: .monospaced))
                             .foregroundStyle(colors.secondary)
                     }
-                    Text("Cek rilis terbaru dari GitHub dan pasang otomatis 1-tap lewat TrollStore tanpa kabel USB.")
-                        .font(.system(size: 11.5))
-                        .foregroundStyle(colors.textHint)
+
+                    HStack(spacing: 6) {
+                        Image(systemName: app.isTrollStoreUrlSchemeReady ? "checkmark.seal.fill" : "exclamationmark.triangle.fill")
+                            .font(.system(size: 11.5))
+                            .foregroundStyle(app.isTrollStoreUrlSchemeReady ? colors.successText : colors.warningText)
+                        Text(app.isTrollStoreUrlSchemeReady
+                             ? "TrollStore 1-Tap Siap (URL Scheme Aktif)"
+                             : "Aktifkan URL Scheme di TrollStore → Settings untuk 1-Tap Update")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(app.isTrollStoreUrlSchemeReady ? colors.successText : colors.warningText)
+                        Spacer()
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 7)
+                    .background(app.isTrollStoreUrlSchemeReady ? colors.successContainer : colors.warningContainer)
+                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+
+                    Toggle(isOn: $app.autoCheckUpdates) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Cek Update Otomatis")
+                                .font(.system(size: 13, weight: .semibold))
+                                .foregroundStyle(colors.textPrimary)
+                            Text(app.lastUpdateCheckText.isEmpty
+                                 ? "Otomatis cek server update setiap buka aplikasi"
+                                 : "Server update aktif • \(app.lastUpdateCheckText)")
+                                .font(.system(size: 11))
+                                .foregroundStyle(colors.textHint)
+                        }
+                    }
+                    .tint(colors.secondary)
 
                     HStack(spacing: 8) {
                         SiapOutlinedButton(
-                            app.isCheckingUpdate ? "Memeriksa..." : "Cek Pembaruan",
+                            app.isCheckingUpdate ? "Memeriksa..." : "Cek Sekarang",
                             icon: "arrow.triangle.2.circlepath",
                             color: colors.secondary
                         ) {
-                            Task { await app.checkForAppUpdate(silent: false) }
+                            Task { await app.checkForAppUpdate(silent: false, force: true) }
                         }
                         .disabled(app.isCheckingUpdate)
 
                         SiapFilledButton(
-                            app.availableUpdate != nil ? "Update v\(app.availableUpdate!.remoteVersion)" : "Install Latest (TrollStore)",
+                            app.availableUpdate != nil ? "Update v\(app.availableUpdate!.remoteVersion)" : "Install Latest",
                             icon: "arrow.down.circle.fill",
                             bg: colors.primaryAction,
                             fg: colors.onPrimaryAction
                         ) {
-                            let info = app.availableUpdate ?? AppUpdateInfo(
-                                remoteVersion: app.currentAppVersion,
-                                remoteBuild: app.currentAppBuild,
-                                ipaDownloadUrl: "https://github.com/rianpermana7io/SiapNEO/releases/download/latest/SIAPNeo-iOS.ipa",
-                                notes: ""
-                            )
-                            app.triggerTrollStoreUpdate(info)
+                            if app.availableUpdate != nil {
+                                app.showUpdatePromptSheet = true
+                            } else {
+                                let info = AppUpdateInfo(
+                                    remoteVersion: app.currentAppVersion,
+                                    remoteBuild: app.currentAppBuild,
+                                    ipaDownloadUrl: "https://github.com/rianpermana7io/SiapNEO/releases/download/latest/SIAPNeo-iOS.ipa",
+                                    ipaSizeBytes: 0,
+                                    publishedAt: "",
+                                    notes: "",
+                                    mandatory: false
+                                )
+                                app.triggerTrollStoreUpdate(info)
+                            }
                         }
                     }
                 }
@@ -4601,7 +4701,7 @@ struct UserTabView: View {
                 }
                 .padding(.horizontal, 12)
 
-                Text("SIAP NEO iOS Native v1.19.6 • KPU BC Tipe A Tanjung Priok")
+                Text("SIAP NEO iOS Native v1.19.7 • KPU BC Tipe A Tanjung Priok")
                     .font(.system(size: 11))
                     .foregroundStyle(colors.textHint)
                     .padding(.bottom, 14)
@@ -4649,5 +4749,168 @@ struct UserTabView: View {
             res.append((name, ok, detail))
         }
         diagResults = res
+    }
+}
+
+// MARK: - Android-Style Auto-Update Prompt Sheet
+
+struct UpdatePromptSheet: View {
+    @EnvironmentObject var app: AppState
+    let info: AppUpdateInfo
+    let colors: SiapColors
+
+    private var cleanChangelogLines: [String] {
+        let raw = info.notes.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !raw.isEmpty else {
+            return ["Perbaikan performa, stabilitas, dan pembaruan fitur SIAP NEO iOS."]
+        }
+        return raw
+            .components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty && !$0.hasPrefix("VERSION=") }
+    }
+
+    var body: some View {
+        NavigationView {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    // Header Hero Card
+                    VStack(spacing: 10) {
+                        ZStack {
+                            Circle()
+                                .fill(SiapColors.brandAmber.opacity(0.18))
+                                .frame(width: 68, height: 68)
+                            Image("SiapLogo")
+                                .resizable()
+                                .scaledToFit()
+                                .frame(width: 48, height: 48)
+                        }
+
+                        Text(info.mandatory ? "Pembaruan Wajib Tersedia" : "Pembaruan SIAP NEO Tersedia")
+                            .font(.system(size: 18, weight: .heavy))
+                            .foregroundStyle(.white)
+                            .multilineTextAlignment(.center)
+
+                        HStack(spacing: 8) {
+                            Text("v\(app.currentAppVersion)")
+                                .font(.system(size: 12, weight: .bold, design: .monospaced))
+                                .padding(.horizontal, 9)
+                                .padding(.vertical, 4)
+                                .background(Color.white.opacity(0.14))
+                                .foregroundStyle(.white)
+                                .clipShape(Capsule())
+
+                            Image(systemName: "arrow.right")
+                                .font(.system(size: 11, weight: .bold))
+                                .foregroundStyle(SiapColors.brandAmber)
+
+                            Text("v\(info.remoteVersion) (Build \(info.remoteBuild))")
+                                .font(.system(size: 12, weight: .heavy, design: .monospaced))
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 4)
+                                .background(SiapColors.brandAmber)
+                                .foregroundStyle(Color(hex: 0x0B131D))
+                                .clipShape(Capsule())
+                        }
+
+                        if !info.formattedSize.isEmpty {
+                            Text("Ukuran paket IPA: \(info.formattedSize)")
+                                .font(.system(size: 11.5, weight: .medium))
+                                .foregroundStyle(SiapColors.hintOnNavy)
+                        }
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 20)
+                    .padding(.horizontal, 16)
+                    .background(SiapColors.light.headerGradient)
+                    .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+
+                    // TrollStore Status Pill
+                    HStack(spacing: 8) {
+                        Image(systemName: app.isTrollStoreUrlSchemeReady ? "bolt.shield.fill" : "info.circle.fill")
+                            .foregroundStyle(app.isTrollStoreUrlSchemeReady ? colors.successText : colors.warningText)
+                        Text(app.isTrollStoreUrlSchemeReady
+                             ? "TrollStore URL Scheme aktif — ketuk tombol di bawah untuk unduh & pasang otomatis 1-tap."
+                             : "Tips: Nyalakan TrollStore → Settings → URL Scheme Enabled agar update bisa langsung 1-tap tanpa Safari.")
+                            .font(.system(size: 11.5, weight: .medium))
+                            .foregroundStyle(app.isTrollStoreUrlSchemeReady ? colors.successText : colors.warningText)
+                    }
+                    .padding(12)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(app.isTrollStoreUrlSchemeReady ? colors.successContainer : colors.warningContainer)
+                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+
+                    // Apa yang Baru / Changelog
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Apa yang Baru")
+                            .font(.system(size: 14, weight: .bold))
+                            .foregroundStyle(colors.textPrimary)
+
+                        VStack(alignment: .leading, spacing: 6) {
+                            ForEach(Array(cleanChangelogLines.enumerated()), id: \.offset) { _, line in
+                                HStack(alignment: .top, spacing: 8) {
+                                    Circle()
+                                        .fill(colors.secondary)
+                                        .frame(width: 6, height: 6)
+                                        .padding(.top, 6)
+                                    Text(line.hasPrefix("- ") || line.hasPrefix("• ") ? String(line.dropFirst(2)) : line)
+                                        .font(.system(size: 13))
+                                        .foregroundStyle(colors.textPrimary)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                }
+                            }
+                        }
+                    }
+                    .padding(14)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(colors.surface)
+                    .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).stroke(colors.cardBorder, lineWidth: 1))
+                    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+
+                    // Action Buttons
+                    VStack(spacing: 10) {
+                        Button {
+                            app.triggerTrollStoreUpdate(info)
+                        } label: {
+                            HStack(spacing: 8) {
+                                Image(systemName: "arrow.down.circle.fill")
+                                Text("Perbarui Otomatis via TrollStore")
+                            }
+                            .font(.system(size: 14.5, weight: .heavy))
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 14)
+                            .background(SiapColors.brandAmber)
+                            .foregroundStyle(Color(hex: 0x0B131D))
+                            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                        }
+                        .buttonStyle(.plain)
+
+                        HStack(spacing: 10) {
+                            SiapOutlinedButton("Unduh via Safari", icon: "safari", color: colors.secondary) {
+                                app.openDirectIpaDownload(info)
+                            }
+                            if !info.mandatory {
+                                SiapOutlinedButton("Nanti Saja", icon: "clock", color: colors.textHint) {
+                                    app.dismissUpdatePrompt(snoozeBuild: true)
+                                }
+                            }
+                        }
+                    }
+                }
+                .padding(16)
+            }
+            .background(colors.backdrop.ignoresSafeArea())
+            .navigationTitle("Pembaruan SIAP NEO")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                if !info.mandatory {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("Tutup") {
+                            app.dismissUpdatePrompt(snoozeBuild: true)
+                        }
+                    }
+                }
+            }
+        }
     }
 }

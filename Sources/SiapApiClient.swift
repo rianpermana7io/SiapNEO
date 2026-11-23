@@ -844,12 +844,45 @@ final class SiapApiClient {
         return try await fetchPendokAttachments(username: username, password: password, fallbackEmail: fallbackEmail, kodePelayanan: first.actionId)
     }
 
-    /// Checks latest GitHub Release metadata for in-app TrollStore auto-update
+    /// Checks latest update manifest (unlimited CDN) with fallback to GitHub Releases API
     func checkLatestReleaseUpdate() async -> AppUpdateInfo? {
+        let ts = Int(Date().timeIntervalSince1970)
+        // 1. Primary: direct CDN update-manifest.json (zero API rate-limit, rich changelog)
+        if let manifestUrl = URL(string: "https://github.com/rianpermana7io/SiapNEO/releases/download/latest/update-manifest.json?_t=\(ts)") {
+            var mReq = URLRequest(url: manifestUrl)
+            mReq.setValue("SIAPNeo-iOS-Updater", forHTTPHeaderField: "User-Agent")
+            mReq.cachePolicy = .reloadIgnoringLocalCacheData
+            mReq.timeoutInterval = 12
+            if let (data, resp) = try? await session.data(for: mReq),
+               let http = resp as? HTTPURLResponse, (200...299).contains(http.statusCode),
+               let dict = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] {
+                let ver = (dict["version"] as? String) ?? ""
+                let build = (dict["build"] as? Int) ?? Int((dict["build"] as? String) ?? "0") ?? 0
+                let ipaUrl = (dict["ipa_url"] as? String) ?? "https://github.com/rianpermana7io/SiapNEO/releases/download/latest/SIAPNeo-iOS.ipa"
+                let sizeBytes = (dict["ipa_size_bytes"] as? Int) ?? 0
+                let publishedAt = (dict["published_at"] as? String) ?? ""
+                let notes = (dict["changelog"] as? String) ?? (dict["notes"] as? String) ?? ""
+                let mandatory = (dict["mandatory"] as? Bool) ?? false
+                if !ver.isEmpty || build > 0 {
+                    return AppUpdateInfo(
+                        remoteVersion: ver,
+                        remoteBuild: build,
+                        ipaDownloadUrl: ipaUrl,
+                        ipaSizeBytes: sizeBytes,
+                        publishedAt: publishedAt,
+                        notes: notes,
+                        mandatory: mandatory
+                    )
+                }
+            }
+        }
+
+        // 2. Fallback: GitHub Releases API (same pattern as Android AppUpdater)
         guard let url = URL(string: "https://api.github.com/repos/rianpermana7io/SiapNEO/releases/tags/latest") else { return nil }
         var req = URLRequest(url: url)
         req.setValue("SIAPNeo-iOS-Updater", forHTTPHeaderField: "User-Agent")
         req.cachePolicy = .reloadIgnoringLocalCacheData
+        req.timeoutInterval = 12
         guard let (data, resp) = try? await session.data(for: req),
               let http = resp as? HTTPURLResponse, (200...299).contains(http.statusCode),
               let dict = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
@@ -857,18 +890,43 @@ final class SiapApiClient {
         }
         let title = (dict["name"] as? String) ?? ""
         let body = (dict["body"] as? String) ?? ""
+        let publishedAt = (dict["published_at"] as? String) ?? ""
         let combined = "\(title) \(body)"
         let remoteVer = extractFirstMatch(pattern: #"v?(\d+\.\d+\.\d+)"#, in: combined) ?? ""
         let remoteBuildStr = extractFirstMatch(pattern: #"(?:BUILD=|\()(\d+)"#, in: combined) ?? "0"
         let remoteBuild = Int(remoteBuildStr) ?? 0
         var ipaUrl = "https://github.com/rianpermana7io/SiapNEO/releases/download/latest/SIAPNeo-iOS.ipa"
+        var ipaSize = 0
         if let assets = dict["assets"] as? [[String: Any]],
-           let ipaAsset = assets.first(where: { (($0["name"] as? String) ?? "").lowercased().hasSuffix(".ipa") }),
-           let dl = ipaAsset["browser_download_url"] as? String, !dl.isEmpty {
-            ipaUrl = dl
+           let ipaAsset = assets.first(where: { (($0["name"] as? String) ?? "").lowercased().hasSuffix(".ipa") }) {
+            if let dl = ipaAsset["browser_download_url"] as? String, !dl.isEmpty {
+                ipaUrl = dl
+            }
+            ipaSize = (ipaAsset["size"] as? Int) ?? 0
         }
         guard !remoteVer.isEmpty || remoteBuild > 0 else { return nil }
-        return AppUpdateInfo(remoteVersion: remoteVer, remoteBuild: remoteBuild, ipaDownloadUrl: ipaUrl, notes: body)
+        return AppUpdateInfo(
+            remoteVersion: remoteVer,
+            remoteBuild: remoteBuild,
+            ipaDownloadUrl: ipaUrl,
+            ipaSizeBytes: ipaSize,
+            publishedAt: publishedAt,
+            notes: body,
+            mandatory: body.uppercased().contains("[MANDATORY]") || body.uppercased().contains("[WAJIB]")
+        )
+    }
+
+    func isVersionNewer(remoteVersion: String, remoteBuild: Int, localVersion: String, localBuild: Int) -> Bool {
+        if remoteBuild > localBuild { return true }
+        let rParts = remoteVersion.split(separator: ".").compactMap { Int($0) }
+        let lParts = localVersion.split(separator: ".").compactMap { Int($0) }
+        let count = max(rParts.count, lParts.count)
+        for i in 0..<count {
+            let rv = i < rParts.count ? rParts[i] : 0
+            let lv = i < lParts.count ? lParts[i] : 0
+            if rv != lv { return rv > lv }
+        }
+        return false
     }
 
     /// Helper to turn dd-MM-yyyy or yyyy-MM-dd (with optional HH:mm:ss) into lexicographically sortable ISO timestamp

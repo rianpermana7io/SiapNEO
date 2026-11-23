@@ -93,11 +93,21 @@ struct PibDocument: Identifiable, Hashable {
     }
 }
 
-struct AppUpdateInfo: Equatable {
+struct AppUpdateInfo: Identifiable, Equatable {
+    var id: String { "\(remoteVersion)_\(remoteBuild)" }
     let remoteVersion: String
     let remoteBuild: Int
     let ipaDownloadUrl: String
+    let ipaSizeBytes: Int
+    let publishedAt: String
     let notes: String
+    let mandatory: Bool
+
+    var formattedSize: String {
+        guard ipaSizeBytes > 0 else { return "" }
+        let mb = Double(ipaSizeBytes) / (1024.0 * 1024.0)
+        return String(format: "%.2f MB", mb)
+    }
 }
 
 /// Exact port of AssignedIpItem from SIAP 3.0 siapfb_pemeriksa/browse_data

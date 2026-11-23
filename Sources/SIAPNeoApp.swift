@@ -42,6 +42,7 @@ struct SIAPNeoApp: App {
 struct SiapRootContainer: View {
     @EnvironmentObject var app: AppState
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.scenePhase) private var scenePhase
 
     private var colors: SiapColors { SiapColors.forScheme(colorScheme) }
 
@@ -80,6 +81,21 @@ struct SiapRootContainer: View {
             }
         }
         .animation(.easeInOut(duration: 0.2), value: app.toastMessage)
+        .sheet(isPresented: $app.showUpdatePromptSheet) {
+            if let upd = app.availableUpdate {
+                UpdatePromptSheet(info: upd, colors: colors)
+                    .environmentObject(app)
+                    .preferredColorScheme(app.themeMode.preferredColorScheme)
+            }
+        }
+        .task {
+            await app.checkForAppUpdate(silent: true, force: true)
+        }
+        .onChange(of: scenePhase) { newPhase in
+            if newPhase == .active {
+                Task { await app.checkForAppUpdate(silent: true, force: false) }
+            }
+        }
     }
 }
 
@@ -97,16 +113,23 @@ struct SiapMainShell: View {
 
             if let upd = app.availableUpdate {
                 HStack(spacing: 8) {
-                    Image(systemName: "arrow.down.circle.fill")
-                        .foregroundStyle(SiapColors.brandAmber)
-                    VStack(alignment: .leading, spacing: 1) {
-                        Text("Update SIAP NEO v\(upd.remoteVersion) tersedia!")
-                            .font(.system(size: 12, weight: .bold))
-                            .foregroundStyle(.white)
-                        Text("Tap Update untuk pasang otomatis via TrollStore")
-                            .font(.system(size: 10.5))
-                            .foregroundStyle(SiapColors.hintOnNavy)
+                    Button {
+                        app.showUpdatePromptSheet = true
+                    } label: {
+                        HStack(spacing: 8) {
+                            Image(systemName: "arrow.down.circle.fill")
+                                .foregroundStyle(SiapColors.brandAmber)
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text("Update SIAP NEO v\(upd.remoteVersion) tersedia!")
+                                    .font(.system(size: 12, weight: .bold))
+                                    .foregroundStyle(.white)
+                                Text("Tap untuk lihat changelog • Pasang 1-tap via TrollStore")
+                                    .font(.system(size: 10.5))
+                                    .foregroundStyle(SiapColors.hintOnNavy)
+                            }
+                        }
                     }
+                    .buttonStyle(.plain)
                     Spacer()
                     Button {
                         app.triggerTrollStoreUpdate(upd)
@@ -122,7 +145,7 @@ struct SiapMainShell: View {
                     .buttonStyle(.plain)
 
                     Button {
-                        app.availableUpdate = nil
+                        app.dismissUpdatePrompt(snoozeBuild: true)
                     } label: {
                         Image(systemName: "xmark")
                             .font(.system(size: 11, weight: .bold))
@@ -183,9 +206,6 @@ struct SiapMainShell: View {
             AjuBarconFormSheet(target: target, colors: colors)
                 .environmentObject(app)
                 .preferredColorScheme(app.themeMode.preferredColorScheme)
-        }
-        .task {
-            await app.checkForAppUpdate(silent: true)
         }
     }
 }
