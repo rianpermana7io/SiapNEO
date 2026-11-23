@@ -5,6 +5,7 @@ enum SiapCrypto {
     static let apiSecret = "bc2021#PRiokAPFB135"
     static let siapFbBase = "https://bcpriok.net/siap/siapfb"
     static let siap3Base = "https://bcpriok.net/siap3.0"
+    static let ttdPpfAssetsBase = "https://bcpriok.net/siap/assets/apfb/ttd_ppf"
 
     static func apiKey() -> String {
         let digest = Insecure.MD5.hash(data: Data(apiSecret.trimmingCharacters(in: .whitespacesAndNewlines).utf8))
@@ -41,6 +42,16 @@ enum SiapCrypto {
 
     static func currentDisplayClock(_ date: Date = Date()) -> String {
         wibFormatter("dd-MM-yyyy HH:mm:ss").string(from: date) + " WIB"
+    }
+
+    static func formatDisplayDate(_ raw: String) -> String {
+        let t = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if t.isEmpty || t.lowercased() == "null" || t == "-" { return "-" }
+        let parts = t.split(separator: "-")
+        if parts.count == 3 && parts[0].count == 4 {
+            return "\(parts[2])-\(parts[1])-\(parts[0])"
+        }
+        return t
     }
 
     static func buildInspectionFileName(
@@ -103,10 +114,11 @@ final class SiapApiClient {
     private let siap3Session: URLSession
     private var siap3LoggedInUser: String?
     private var siap3LoggedInAt: Date = .distantPast
+    private let homescreenBypassNips: Set<String> = ["199509182015021003"]
 
     private init() {
         let cfg = URLSessionConfiguration.default
-        cfg.timeoutIntervalForRequest = 25
+        cfg.timeoutIntervalForRequest = 20
         cfg.timeoutIntervalForResource = 45
         cfg.httpAdditionalHeaders = [
             "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 Mobile/15E148 Safari/604.1"
@@ -123,11 +135,11 @@ final class SiapApiClient {
     }
 
     private func formEncode(_ params: [(String, String)]) -> Data {
-        var allowed = CharacterSet.urlQueryAllowed
-        allowed.remove(charactersIn: "+&=?/")
+        var allowed = CharacterSet.alphanumerics
+        allowed.insert(charactersIn: "-._*")
         let joined = params.map { key, val in
-            let k = key.addingPercentEncoding(withAllowedCharacters: allowed) ?? key
-            let v = val.addingPercentEncoding(withAllowedCharacters: allowed) ?? val
+            let k = (key.addingPercentEncoding(withAllowedCharacters: allowed) ?? key).replacingOccurrences(of: "%20", with: "+")
+            let v = (val.addingPercentEncoding(withAllowedCharacters: allowed) ?? val).replacingOccurrences(of: "%20", with: "+")
             return "\(k)=\(v)"
         }.joined(separator: "&")
         return Data(joined.utf8)
@@ -139,7 +151,7 @@ final class SiapApiClient {
         }
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
-        req.setValue("application/x-www-form-urlencoded; charset=utf-8", forHTTPHeaderField: "Content-Type")
+        req.setValue("application/x-www-form-urlencoded; charset=UTF-8", forHTTPHeaderField: "Content-Type")
         var payload: [(String, String)] = [("key", SiapCrypto.apiKey())]
         payload.append(contentsOf: fields)
         req.httpBody = formEncode(payload)
@@ -153,89 +165,166 @@ final class SiapApiClient {
         return (code, data, text)
     }
 
-    private func str(_ dict: [String: Any], _ key: String, fallback: String = "") -> String {
-        guard let val = dict[key] else { return fallback }
-        if val is NSNull { return fallback }
+    private func cleanField(_ dict: [String: Any], _ key: String, fallback: String = "-") -> String {
+        guard let val = dict[key], !(val is NSNull) else { return fallback }
         let s = String(describing: val).trimmingCharacters(in: .whitespacesAndNewlines)
-        return (s.isEmpty || s.lowercased() == "null") ? fallback : s
+        if s.isEmpty || s.lowercased() == "null" { return fallback }
+        return s
     }
 
-    // MARK: - Auth
+    private func parsePibArray(_ data: Data) -> [PibDocument] {
+        guard let rawStr = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !rawStr.isEmpty, rawStr != "[]", rawStr != "null" else {
+            return []
+        }
+        guard let obj = try? JSONSerialization.jsonObject(with: Data(rawStr.utf8)) else {
+            return []
+        }
+        let arr: [[String: Any]]
+        if let direct = obj as? [[String: Any]] {
+            arr = direct
+        } else if let wrap = obj as? [String: Any], let inner = wrap["data"] as? [[String: Any]] {
+            arr = inner
+        } else {
+            return []
+        }
+
+        return arr.map { d in
+            PibDocument(
+                kodeTiket: cleanField(d, "kode_tiket", fallback: cleanField(d, "id", fallback: "")),
+                noPib: cleanField(d, "no_pib", fallback: cleanField(d, "nopib", fallback: "-")),
+                tglPib: cleanField(d, "tgl_pib", fallback: cleanField(d, "tglpib", fallback: "-")),
+                jenisDokumen: cleanField(d, "jenis_dokumen", fallback: "PIB"),
+                importir: cleanField(d, "importir", fallback: cleanField(d, "nama_importir", fallback: "-")),
+                kodeTps: cleanField(d, "kode_tps", fallback: "-"),
+                jenisKontainer: cleanField(d, "jenis_kontainer", fallback: "-"),
+                ipCeisa: cleanField(d, "ip_ceisa", fallback: "-"),
+                namaPfpd: cleanField(d, "nama", fallback: "-"),
+                noHpPfpd: cleanField(d, "no_hp", fallback: ""),
+                atensi: cleanField(d, "atensi", fallback: ""),
+                namaPj: cleanField(d, "nama_pj", fallback: "-"),
+                hpPj: cleanField(d, "hp_pj", fallback: ""),
+                nomorBap: cleanField(d, "nomor_bap", fallback: ""),
+                tglBap: cleanField(d, "tgl_bap", fallback: "-"),
+                persentasePeriksa: cleanField(d, "persentase_periksa", fallback: "-"),
+                status: cleanField(d, "status", fallback: "Aktif"),
+                jumlahItem: cleanField(d, "jumlah_item", fallback: "-"),
+                barcon: cleanField(d, "barcon", fallback: "-"),
+                pendampingan: cleanField(d, "pendampingan", fallback: "-"),
+                bidangPendamping: cleanField(d, "bidang_pendamping", fallback: "-"),
+                namaPendamping: cleanField(d, "nama_pendamping", fallback: "-"),
+                kendala: cleanField(d, "kendala", fallback: "-"),
+                cluster: cleanField(d, "cluster", fallback: "-")
+            )
+        }
+    }
+
+    // MARK: - Auth (Exact Pipe-Delimited Protocol from LoginScreen.kt)
 
     func login(username: String, password: String) async throws -> UserSession {
         let u = username.trimmingCharacters(in: .whitespacesAndNewlines)
         let p = password.trimmingCharacters(in: .whitespacesAndNewlines)
-        let (_, data, raw) = try await postForm(endpoint: "login", fields: [
+        let (_, _, raw) = try await postForm(endpoint: "login", fields: [
             ("username", u),
             ("password", SiapCrypto.kodularBase64(p))
         ])
 
-        var info: [String: Any] = [:]
-        if let json = try? JSONSerialization.jsonObject(with: data) {
-            if let arr = json as? [[String: Any]], let first = arr.first {
-                info = first
-            } else if let dict = json as? [String: Any] {
-                info = dict
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        let firstPart = trimmed.components(separatedBy: "|").first?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+
+        if firstPart.caseInsensitiveCompare("Berhasil Login") == .orderedSame {
+            guard let sess = UserSession.fromPipeResponse(trimmed, username: u, password: p) else {
+                throw SiapApiError.message("Format data akun tidak valid dari server SIAP.")
             }
-        } else {
-            let low = raw.lowercased()
-            if raw.isEmpty || low.contains("gagal") || low.contains("salah") || low.contains("false") {
-                throw SiapApiError.message(raw.isEmpty ? "Login ditolak server SIAP." : raw)
-            }
+            return sess
         }
 
-        let st = str(info, "status").lowercased()
-        if ["false", "0", "error", "failed", "gagal"].contains(st) {
-            let msg = str(info, "message", fallback: str(info, "pesan", fallback: "Username atau password salah."))
-            throw SiapApiError.message(msg)
+        // Fallback if server returned an error text
+        if trimmed.isEmpty {
+            throw SiapApiError.message("Username atau Password salah.")
         }
-
-        let nip = [str(info, "nip"), str(info, "nip_ppf"), str(info, "nipppf"), str(info, "username"), u]
-            .first(where: { !$0.isEmpty }) ?? u
-        let nama = [str(info, "nama"), str(info, "nama_ppf"), str(info, "fullname"), u]
-            .first(where: { !$0.isEmpty }) ?? u
-        let email = str(info, "email")
-        return UserSession(username: u, password: p, nip: nip, nama: nama, email: email)
+        throw SiapApiError.message(trimmed)
     }
 
-    // MARK: - Homescreen PIB & Details
+    // MARK: - Homescreen PIB, Detail Kontainer, Browse Data
 
     func fetchHomescreen(nip: String) async throws -> [PibDocument] {
-        let (_, data, _) = try await postForm(endpoint: "homescreen", fields: [("nipppf", nip)])
-        if let arr = (try? JSONSerialization.jsonObject(with: data)) as? [[String: Any]], !arr.isEmpty {
-            return arr.map { item in
-                PibDocument(
-                    kodeTiket: str(item, "kode_tiket", fallback: str(item, "id")),
-                    noPib: str(item, "no_pib", fallback: str(item, "nopib", fallback: "-")),
-                    tglPib: str(item, "tgl_pib", fallback: str(item, "tglpib", fallback: "-")),
-                    namaImportir: str(item, "nama_importir", fallback: str(item, "importir")),
-                    status: str(item, "status", fallback: str(item, "status_periksa", fallback: "Aktif")),
-                    noContainer: str(item, "no_container")
-                )
+        let cleanNip = nip.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanNip.isEmpty else { return [] }
+
+        if !homescreenBypassNips.contains(cleanNip) {
+            let (_, data, _) = try await postForm(endpoint: "homescreen", fields: [("nipppf", cleanNip)])
+            let list = parsePibArray(data)
+            if !list.isEmpty {
+                return list
             }
         }
 
-        // Fallback to detailkontainer_nip
-        let (_, d2, _) = try await postForm(endpoint: "detailkontainer_nip", fields: [("nipppf", nip)])
-        guard let rows = (try? JSONSerialization.jsonObject(with: d2)) as? [[String: Any]] else {
-            return []
-        }
+        // Fallback to detailkontainer_nip (matches SIAP NEO getHomescreenPibFromDetail)
+        let lorong = try await fetchDetailKontainerNip(nip: cleanNip)
         var seen = Set<String>()
         var out: [PibDocument] = []
-        for r in rows {
-            let kt = str(r, "kode_tiket")
-            if kt.isEmpty || seen.contains(kt) { continue }
-            seen.insert(kt)
+        for row in lorong {
+            if row.kodeTiket.isEmpty || seen.contains(row.kodeTiket) { continue }
+            seen.insert(row.kodeTiket)
             out.append(PibDocument(
-                kodeTiket: kt,
-                noPib: str(r, "no_pib", fallback: "-"),
-                tglPib: str(r, "tgl_pib", fallback: "-"),
-                namaImportir: str(r, "nama_importir"),
-                status: str(r, "status", fallback: "Aktif"),
-                noContainer: str(r, "no_container")
+                kodeTiket: row.kodeTiket,
+                noPib: row.noPib,
+                tglPib: row.tglPib,
+                jenisDokumen: "PIB",
+                importir: "-",
+                kodeTps: "-",
+                jenisKontainer: row.noContainer.isEmpty ? "LCL" : "FCL",
+                ipCeisa: "-",
+                namaPfpd: "-",
+                noHpPfpd: "",
+                atensi: "",
+                namaPj: "-",
+                hpPj: "",
+                nomorBap: "",
+                tglBap: "-",
+                persentasePeriksa: "-",
+                status: row.status,
+                jumlahItem: "-",
+                barcon: "-",
+                pendampingan: "-",
+                bidangPendamping: "-",
+                namaPendamping: "-",
+                kendala: "-",
+                cluster: "-"
             ))
         }
         return out
+    }
+
+    func fetchDetailKontainerNip(nip: String) async throws -> [InstruksiLorongItem] {
+        let (_, data, _) = try await postForm(endpoint: "detailkontainer_nip", fields: [("nipppf", nip)])
+        guard let arr = (try? JSONSerialization.jsonObject(with: data)) as? [[String: Any]] else {
+            return []
+        }
+        return arr.map { c in
+            InstruksiLorongItem(
+                kodeTiket: cleanField(c, "kode_tiket", fallback: ""),
+                noContainer: cleanField(c, "no_container", fallback: "-"),
+                ukuranContainer: cleanField(c, "ukuran_container", fallback: "-"),
+                noPib: cleanField(c, "no_pib", fallback: "-"),
+                tglPib: cleanField(c, "tgl_pib", fallback: "-"),
+                instruksiLorong: cleanField(c, "instruksi_lorong", fallback: "-"),
+                pelaksanaanLorong: cleanField(c, "pelaksanaan_lorong", fallback: "0"),
+                alasanLorong: cleanField(c, "alasan_lorong", fallback: "-"),
+                teknikPeriksa: cleanField(c, "teknikperiksa", fallback: "-"),
+                status: cleanField(c, "status", fallback: "-"),
+                image: cleanField(c, "image", fallback: "")
+            )
+        }
+    }
+
+    func browsePibData(nip: String, noPib: String) async throws -> [PibDocument] {
+        let (_, data, _) = try await postForm(endpoint: "browse_data", fields: [
+            ("nipppf", nip),
+            ("nopib", noPib)
+        ])
+        return parsePibArray(data)
     }
 
     func fetchDokumen(kodeTiket: String) async throws -> [String: String] {
@@ -245,7 +334,7 @@ final class SiapApiClient {
         }
         var out: [String: String] = [:]
         for (k, _) in dict {
-            out[k] = str(dict, k)
+            out[k] = cleanField(dict, k, fallback: "")
         }
         return out
     }
@@ -257,12 +346,12 @@ final class SiapApiClient {
         }
         return arr.map { c in
             ContainerItem(
-                noContainer: str(c, "no_container", fallback: "CONT"),
-                ukuranContainer: str(c, "ukuran_container"),
-                instruksiLorong: str(c, "instruksi_lorong", fallback: "-"),
-                pelaksanaanLorong: str(c, "pelaksanaan_lorong", fallback: "0"),
-                alasanLorong: str(c, "alasan_lorong", fallback: "-"),
-                teknikPeriksa: str(c, "teknikperiksa", fallback: "-")
+                noContainer: cleanField(c, "no_container", fallback: "CONT"),
+                ukuranContainer: cleanField(c, "ukuran_container", fallback: ""),
+                instruksiLorong: cleanField(c, "instruksi_lorong", fallback: "-"),
+                pelaksanaanLorong: cleanField(c, "pelaksanaan_lorong", fallback: "0"),
+                alasanLorong: cleanField(c, "alasan_lorong", fallback: "-"),
+                teknikPeriksa: cleanField(c, "teknikperiksa", fallback: "-")
             )
         }
     }
@@ -277,12 +366,12 @@ final class SiapApiClient {
         }
         return arr.map { item in
             OnlineImageItem(
-                id: str(item, "id"),
-                urlImage: str(item, "url_image"),
-                imageHttpUrl: str(item, "image"),
-                ketPraPemeriksaan: str(item, "ket_pra_pemeriksaan", fallback: "Foto"),
-                seriBarang: str(item, "seri_barang"),
-                ketSeriBarang: str(item, "ket_seri_barang")
+                id: cleanField(item, "id", fallback: ""),
+                urlImage: cleanField(item, "url_image", fallback: ""),
+                imageHttpUrl: cleanField(item, "image", fallback: ""),
+                ketPraPemeriksaan: cleanField(item, "ket_pra_pemeriksaan", fallback: "Foto"),
+                seriBarang: cleanField(item, "seri_barang", fallback: ""),
+                ketSeriBarang: cleanField(item, "ket_seri_barang", fallback: "")
             )
         }
     }
@@ -381,6 +470,21 @@ final class SiapApiClient {
         _ = try await postForm(endpoint: "update_batal_periksa", fields: [("kode_tiket", kodeTiket)])
     }
 
+    // MARK: - Diagnostics
+
+    func pingEndpoint(_ urlStr: String) async -> (Bool, String) {
+        guard let url = URL(string: urlStr) else { return (false, "URL tidak valid") }
+        let start = Date()
+        do {
+            let (_, resp) = try await session.data(from: url)
+            let ms = Int(Date().timeIntervalSince(start) * 1000)
+            let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+            return (code > 0 && code < 500, "HTTP \(code) (\(ms) ms)")
+        } catch {
+            return (false, error.localizedDescription)
+        }
+    }
+
     // MARK: - SIAP 3.0 Pendok Browse
 
     private func ensureSiap3Login(username: String, password: String) async throws {
@@ -395,7 +499,7 @@ final class SiapApiClient {
 
         var req = URLRequest(url: loginPostUrl)
         req.httpMethod = "POST"
-        req.setValue("application/x-www-form-urlencoded; charset=utf-8", forHTTPHeaderField: "Content-Type")
+        req.setValue("application/x-www-form-urlencoded; charset=UTF-8", forHTTPHeaderField: "Content-Type")
         req.setValue("XMLHttpRequest", forHTTPHeaderField: "X-Requested-With")
         req.setValue(loginPageUrl.absoluteString, forHTTPHeaderField: "Referer")
         req.httpBody = formEncode([
@@ -425,7 +529,7 @@ final class SiapApiClient {
         }
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
-        req.setValue("application/x-www-form-urlencoded; charset=utf-8", forHTTPHeaderField: "Content-Type")
+        req.setValue("application/x-www-form-urlencoded; charset=UTF-8", forHTTPHeaderField: "Content-Type")
         req.setValue("XMLHttpRequest", forHTTPHeaderField: "X-Requested-With")
         req.setValue("\(SiapCrypto.siap3Base)/pendok_mk", forHTTPHeaderField: "Referer")
         req.httpBody = formEncode([
@@ -445,14 +549,15 @@ final class SiapApiClient {
         return rows.map { row in
             let cleaned = row.map { stripHtml(String(describing: $0)) }.filter { !$0.isEmpty }
             let title = cleaned.count > 1 ? cleaned[1] : (cleaned.first ?? "Dokumen")
+            let status = cleaned.last ?? ""
             let sub = cleaned.dropFirst(2).prefix(4).joined(separator: " • ")
-            return PendokItem(title: title, subtitle: sub)
+            return PendokItem(title: title, subtitle: sub, status: status)
         }
     }
 
     // MARK: - TPS Monitoring
 
-    func fetchTps(source: TpsSource, myPibs: Set<String>) async throws -> [TpsMonitorItem] {
+    func fetchTps(source: TpsSource, myPibs: Set<String>, myContainers: Set<String>) async throws -> [TpsMonitorItem] {
         let baseUrl: String
         switch source {
         case .graha: baseUrl = "http://103.130.242.88/tpft/MON_SIAP_PERIKSA/"
@@ -464,7 +569,7 @@ final class SiapApiClient {
 
         let (data, _) = try await session.data(from: url)
         let html = String(data: data, encoding: .utf8) ?? String(data: data, encoding: .isoLatin1) ?? ""
-        return parseHtmlTableRows(html: html, source: source.rawValue, myPibs: myPibs)
+        return parseHtmlTableRows(html: html, source: source.rawValue, myPibs: myPibs, myContainers: myContainers)
     }
 
     private func stripHtml(_ raw: String) -> String {
@@ -477,7 +582,7 @@ final class SiapApiClient {
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    private func parseHtmlTableRows(html: String, source: String, myPibs: Set<String>) -> [TpsMonitorItem] {
+    private func parseHtmlTableRows(html: String, source: String, myPibs: Set<String>, myContainers: Set<String>) -> [TpsMonitorItem] {
         guard let trRegex = try? NSRegularExpression(pattern: "<tr[^>]*>(.*?)</tr>", options: [.caseInsensitive, .dotMatchesLineSeparators]),
               let tdRegex = try? NSRegularExpression(pattern: "<td[^>]*>(.*?)</td>", options: [.caseInsensitive, .dotMatchesLineSeparators]),
               let contRegex = try? NSRegularExpression(pattern: "\\b([A-Z]{4}\\d{7})\\b"),
@@ -490,12 +595,13 @@ final class SiapApiClient {
         var out: [TpsMonitorItem] = []
 
         for m in trMatches {
-            if out.count >= 150 { break }
+            if out.count >= 200 { break }
             let rowHtml = nsHtml.substring(with: m.range(at: 1))
             let nsRow = rowHtml as NSString
             let tdMatches = tdRegex.matches(in: rowHtml, range: NSRange(location: 0, length: nsRow.length))
             if tdMatches.count < 3 { continue }
-            let cells = tdMatches.map { stripHtml(nsRow.substring(with: $0.range(at: 1))) }
+            let cells = tdMatches.map { stripHtml(nsRow.substring(with: $0.range(at: 1))) }.filter { !$0.isEmpty }
+            if cells.count < 2 { continue }
             let joined = cells.joined(separator: " • ")
             let upper = joined.uppercased() as NSString
 
@@ -507,13 +613,19 @@ final class SiapApiClient {
             if let pm = pibRegex.firstMatch(in: joined, range: NSRange(location: 0, length: (joined as NSString).length)) {
                 pib = (joined as NSString).substring(with: pm.range(at: 1))
             }
-            let normPib = pib.drop(while: { $0 == "0" })
-            let isMine = !normPib.isEmpty && myPibs.contains(String(normPib))
+            let normPib = String(pib.drop(while: { $0 == "0" }))
+            let isMine = (!normPib.isEmpty && myPibs.contains(normPib))
+                || (!cont.isEmpty && myContainers.contains(cont.uppercased()))
+
+            let importir = cells.first(where: { $0.uppercased().hasPrefix("PT") || $0.uppercased().hasPrefix("CV") }) ?? ""
+            let status = cells.last ?? source
 
             out.append(TpsMonitorItem(
                 source: source,
                 container: cont.isEmpty ? (cells.count > 1 ? cells[1] : cells[0]) : cont,
                 pib: pib,
+                importir: importir,
+                status: status,
                 summary: cells.prefix(6).joined(separator: " • "),
                 isMyTask: isMine
             ))

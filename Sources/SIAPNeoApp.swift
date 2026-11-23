@@ -10,14 +10,17 @@ struct SIAPNeoApp: App {
                 if appState.session != nil {
                     TabView {
                         HomeTabView()
-                            .tabItem { Label("Tugas", systemImage: "list.clipboard.fill") }
-                        PendokTabView()
-                            .tabItem { Label("Pendok", systemImage: "folder.fill") }
+                            .tabItem { Label("Beranda", systemImage: "house.fill") }
+                        LorongTabView()
+                            .tabItem { Label("Lorong", systemImage: "shippingbox.fill") }
+                        BrowseTabView()
+                            .tabItem { Label("Browse", systemImage: "doc.text.magnifyingglass") }
                         TpsTabView()
                             .tabItem { Label("TPS", systemImage: "ferry.fill") }
                         UserTabView()
                             .tabItem { Label("Akun", systemImage: "person.crop.circle.fill") }
                     }
+                    .tint(SiapPalette.navy)
                 } else {
                     LoginView()
                 }
@@ -28,8 +31,9 @@ struct SIAPNeoApp: App {
                         .foregroundStyle(.white)
                         .padding(.horizontal, 16)
                         .padding(.vertical, 10)
-                        .background(Color.black.opacity(0.82))
+                        .background(SiapPalette.navyDark.opacity(0.94))
                         .cornerRadius(12)
+                        .shadow(color: Color.black.opacity(0.25), radius: 8, y: 4)
                         .padding(.top, 12)
                         .transition(.move(edge: .top).combined(with: .opacity))
                         .zIndex(100)
