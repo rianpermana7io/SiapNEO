@@ -1989,16 +1989,13 @@ struct UploadFotoPanel: View {
     @State private var deleteTarget: OnlineImageItem?
     @State private var showBarangSheet = false
 
-    // Kontainer section state (Perintah Lorong, Ya/Tidak, Waktu Mulai, Update & Selesai)
+    // Kontainer section state (Perintah Lorong, Ya/Tidak, Waktu Mulai)
     @State private var lorongDilaksanakanYa = true
     @State private var alasanTidakLorong = "-"
     @State private var teknikPeriksa = "-"
     @State private var alasanOptions: [String] = []
     @State private var teknikOptions: [String] = []
     @State private var waktuMulaiText = ""
-    @State private var isUpdatingContainer = false
-    @State private var isFinishingContainer = false
-    @State private var showFinishConfirm = false
 
     private var activeContainer: ContainerItem? {
         allContainers.first(where: { $0.noContainer.caseInsensitiveCompare(selectedNokon) == .orderedSame })
@@ -2291,48 +2288,6 @@ struct UploadFotoPanel: View {
                                 .font(.system(size: 13.5, weight: .medium, design: .monospaced))
                                 .foregroundStyle(colors.textSecondary)
                         }
-
-                        // UPDATE DATA KONTAINER (Navy Button)
-                        Button {
-                            Task { await updateContainerData() }
-                        } label: {
-                            HStack(spacing: 8) {
-                                if isUpdatingContainer {
-                                    ProgressView().tint(.white).scaleEffect(0.85)
-                                }
-                                Text(isUpdatingContainer ? "MEMPERBARUI..." : "UPDATE DATA KONTAINER")
-                                    .font(.system(size: 13.5, weight: .bold))
-                                    .tracking(0.3)
-                            }
-                            .foregroundStyle(.white)
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 13.5)
-                            .background(navyActionColor)
-                            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-                        }
-                        .buttonStyle(.plain)
-                        .disabled(isUpdatingContainer)
-
-                        // SELESAI PERIKSA KONTAINER (Green Button)
-                        Button {
-                            showFinishConfirm = true
-                        } label: {
-                            HStack(spacing: 8) {
-                                if isFinishingContainer {
-                                    ProgressView().tint(.white).scaleEffect(0.85)
-                                }
-                                Text(isFinishingContainer ? "MENYELESAIKAN..." : "SELESAI PERIKSA KONTAINER")
-                                    .font(.system(size: 13.5, weight: .bold))
-                                    .tracking(0.3)
-                            }
-                            .foregroundStyle(.white)
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 13.5)
-                            .background(greenFinishColor)
-                            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-                        }
-                        .buttonStyle(.plain)
-                        .disabled(isFinishingContainer)
                     }
                     .padding(16)
                     .background(colors.surface)
@@ -2462,14 +2417,6 @@ struct UploadFotoPanel: View {
         } message: {
             Text("Hapus foto ini dari pemeriksaan kontainer \(selectedNokon)?")
         }
-        .alert("Selesai Periksa Kontainer?", isPresented: $showFinishConfirm) {
-            Button("Batal", role: .cancel) {}
-            Button("Ya, Selesai") {
-                Task { await finishContainerInspection() }
-            }
-        } message: {
-            Text("Tandai pemeriksaan kontainer \(selectedNokon) (PIB \(pib.noPib)) selesai?")
-        }
     }
 
     private func syncContainerFormState() {
@@ -2511,39 +2458,6 @@ struct UploadFotoPanel: View {
         isLoadingImages = true
         defer { isLoadingImages = false }
         onlineImages = (try? await SiapApiClient.shared.fetchImages(kodeTiket: pib.kodeTiket, nokon: selectedNokon)) ?? []
-    }
-
-    private func updateContainerData() async {
-        isUpdatingContainer = true
-        defer { isUpdatingContainer = false }
-        do {
-            _ = try await SiapApiClient.shared.insertInstruksiLorong(
-                kodeTiket: pib.kodeTiket,
-                noPib: pib.noPib,
-                tglPib: pib.tglPib,
-                nokon: selectedNokon,
-                instruksiLorong: perintahLorongDisplay,
-                lokasiPeriksa: locMgr.coordinateText,
-                ukuranKontainer: activeContainer?.ukuranContainer ?? "",
-                statusContainer: lorongDilaksanakanYa ? "1" : "0"
-            )
-            app.showToast("Data kontainer \(selectedNokon) berhasil diperbarui")
-        } catch {
-            app.showToast("Gagal update kontainer: \(error.localizedDescription)")
-        }
-    }
-
-    private func finishContainerInspection() async {
-        isFinishingContainer = true
-        defer { isFinishingContainer = false }
-        do {
-            try await SiapApiClient.shared.updateSelesaiPeriksa(kodeTiket: pib.kodeTiket)
-            app.showToast("Pemeriksaan kontainer \(selectedNokon) selesai")
-            await app.loadPibs()
-            app.activeUploadContext = nil
-        } catch {
-            app.showToast("Gagal menyelesaikan pemeriksaan: \(error.localizedDescription)")
-        }
     }
 }
 
