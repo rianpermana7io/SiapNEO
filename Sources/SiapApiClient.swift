@@ -396,7 +396,10 @@ final class SiapApiClient {
         ukuran: String,
         waktuFoto: String,
         uraianBarang: String,
-        jumlahJenisKemasan: String
+        jumlahJenisKemasan: String,
+        pelLorong: String = "0",
+        alasanLorong: String = "-",
+        teknikPeriksa: String = "-"
     ) async throws -> String {
         if isLcl {
             let (_, _, raw) = try await postForm(endpoint: "insert_image_lcl", fields: [
@@ -430,9 +433,9 @@ final class SiapApiClient {
                 ("waktu_foto", waktuFoto),
                 ("status_hapus", "0"),
                 ("status_online", "1"),
-                ("pel_lorong", "0"),
-                ("alasan_lorong", "-"),
-                ("teknik_periksa", "-"),
+                ("pel_lorong", pelLorong),
+                ("alasan_lorong", alasanLorong),
+                ("teknik_periksa", teknikPeriksa),
                 ("jumlah_jenis_kemasan", jumlahJenisKemasan),
                 ("uraian_barang", uraianBarang),
                 ("satuan_barang", ""),
@@ -441,6 +444,63 @@ final class SiapApiClient {
             ])
             return raw
         }
+    }
+
+    func cekPelaksanaanLorong(kodeTiket: String, nokon: String) async -> String {
+        guard let (_, _, raw) = try? await postForm(endpoint: "cek_pelaksanaan_instruksi_lorong", fields: [
+            ("kode_tiket", kodeTiket),
+            ("nomorkontainer", nokon)
+        ]) else {
+            return "0"
+        }
+        return raw.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines.union(CharacterSet(charactersIn: "\"")))
+    }
+
+    func fetchAlasanTidakLorong() async -> [String] {
+        guard let (_, data, _) = try? await postForm(endpoint: "get_alasantidaklorong", fields: []),
+              let arr = (try? JSONSerialization.jsonObject(with: data)) as? [[String: Any]] else {
+            return []
+        }
+        return arr.compactMap { dict in
+            let v = cleanField(dict, "alasantidaklorong", fallback: "")
+            return v.isEmpty ? nil : v
+        }
+    }
+
+    func fetchTeknikPeriksa() async -> [String] {
+        guard let (_, data, _) = try? await postForm(endpoint: "get_teknikperiksa", fields: []),
+              let arr = (try? JSONSerialization.jsonObject(with: data)) as? [[String: Any]] else {
+            return []
+        }
+        return arr.compactMap { dict in
+            let v = cleanField(dict, "teknikperiksa", fallback: "")
+            return v.isEmpty ? nil : v
+        }
+    }
+
+    func insertInstruksiLorong(
+        kodeTiket: String,
+        noPib: String,
+        tglPib: String,
+        nokon: String,
+        instruksiLorong: String,
+        lokasiPeriksa: String,
+        ukuranKontainer: String,
+        statusContainer: String,
+        typeDevice: String = "iOS"
+    ) async throws -> String {
+        let (_, _, raw) = try await postForm(endpoint: "insert_instruksilorong", fields: [
+            ("kode_tiket", kodeTiket),
+            ("nopib", noPib),
+            ("tanggalpib", tglPib),
+            ("nomorkontainer", nokon),
+            ("instruksilorong", instruksiLorong),
+            ("lokasiperiksa", lokasiPeriksa),
+            ("ukurankontainer", ukuranKontainer),
+            ("status_container", statusContainer),
+            ("typedevice", typeDevice)
+        ])
+        return raw
     }
 
     func deleteImage(imageId: String) async throws {

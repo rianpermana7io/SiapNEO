@@ -1961,7 +1961,13 @@ struct DokapPillButton: View {
     }
 }
 
-// MARK: - Full-Screen Drill-Down: UploadFotoPanel (Matches Android UploadFotoPanel)
+// MARK: - Full-Screen Drill-Down: UploadFotoPanel (CEISA / SIAP Foto Kontainer UI)
+
+private struct PendingPhotoUpload: Identifiable {
+    let id = UUID()
+    let step: StepOption
+    let image: UIImage
+}
 
 struct UploadFotoPanel: View {
     @EnvironmentObject var app: AppState
@@ -1972,37 +1978,85 @@ struct UploadFotoPanel: View {
 
     @StateObject private var locMgr = LocationManager()
     @State private var selectedNokon = ""
-    @State private var selectedStep: StepOption = StepOption.allSteps[0]
-    @State private var deskripsi = ""
-    @State private var watermarkEnabled = true
-    @State private var pickedImage: UIImage?
+    @State private var activeAddStep: StepOption = StepOption.containerPhotoSteps[0]
+    @State private var showSourceDialog = false
     @State private var pickerSource: UIImagePickerController.SourceType?
-    @State private var isUploading = false
-    @State private var isOcrRunning = false
+    @State private var pendingUpload: PendingPhotoUpload?
+    @State private var watermarkEnabled = true
     @State private var onlineImages: [OnlineImageItem] = []
     @State private var isLoadingImages = false
     @State private var fullscreenImage: OnlineImageItem?
     @State private var deleteTarget: OnlineImageItem?
+    @State private var showBarangSheet = false
+
+    // Kontainer section state (Perintah Lorong, Ya/Tidak, Waktu Mulai, Update & Selesai)
+    @State private var lorongDilaksanakanYa = true
+    @State private var alasanTidakLorong = "-"
+    @State private var teknikPeriksa = "-"
+    @State private var alasanOptions: [String] = []
+    @State private var teknikOptions: [String] = []
+    @State private var waktuMulaiText = ""
+    @State private var isUpdatingContainer = false
+    @State private var isFinishingContainer = false
+    @State private var showFinishConfirm = false
+
+    private var activeContainer: ContainerItem? {
+        allContainers.first(where: { $0.noContainer.caseInsensitiveCompare(selectedNokon) == .orderedSame })
+    }
+
+    private var perintahLorongDisplay: String {
+        let raw = activeContainer?.instruksiLorong.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return (raw.isEmpty || raw == "not found") ? "-" : raw
+    }
+
+    private var barangImagesCount: Int {
+        onlineImages.filter { item in
+            StepOption.barangPhotoSteps.contains(where: { $0.matches(item.ketPraPemeriksaan) })
+        }.count
+    }
+
+    private var unmatchedContainerImages: [OnlineImageItem] {
+        onlineImages.filter { item in
+            !StepOption.containerPhotoSteps.contains(where: { $0.matches(item.ketPraPemeriksaan) })
+            && !StepOption.barangPhotoSteps.contains(where: { $0.matches(item.ketPraPemeriksaan) })
+        }
+    }
+
+    private var sectionHeaderColor: Color {
+        colors.isDark ? SiapColors.brandSky : Color(hex: 0x163A63)
+    }
+
+    private var navyActionColor: Color {
+        colors.isDark ? Color(hex: 0x1E4B8A) : Color(hex: 0x0A2D63)
+    }
+
+    private var greenFinishColor: Color {
+        Color(hex: 0x4BD367)
+    }
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
-                // Container Switcher Pills
-                if !allContainers.isEmpty {
+                // Multi-container switcher pills (only shown when > 1 container)
+                if allContainers.count > 1 {
                     ScrollView(.horizontal, showsIndicators: false) {
                         HStack(spacing: 7) {
                             ForEach(allContainers) { c in
                                 let active = selectedNokon == c.noContainer
                                 Button {
                                     selectedNokon = c.noContainer
-                                    Task { await loadImages() }
+                                    syncContainerFormState()
+                                    if let ctx = app.activeUploadContext {
+                                        app.activeUploadContext = UploadFotoContext(pib: ctx.pib, nokon: c.noContainer, containers: ctx.containers)
+                                    }
+                                    Task { await loadContainerData() }
                                 } label: {
                                     Text(c.noContainer)
                                         .font(.system(size: 12, weight: .bold, design: .monospaced))
                                         .padding(.horizontal, 11)
-                                        .padding(.vertical, 7)
-                                        .background(active ? colors.primaryAction : colors.surface)
-                                        .foregroundStyle(active ? colors.onPrimaryAction : colors.textSecondary)
+                                        .padding(.vertical, 6)
+                                        .background(active ? navyActionColor : colors.surface)
+                                        .foregroundStyle(active ? Color.white : colors.textSecondary)
                                         .overlay(
                                             Capsule().stroke(active ? Color.clear : colors.cardBorder, lineWidth: 1)
                                         )
@@ -2011,265 +2065,378 @@ struct UploadFotoPanel: View {
                                 .buttonStyle(.plain)
                             }
                         }
-                        .padding(.horizontal, 12)
+                        .padding(.horizontal, 14)
                     }
                     .padding(.top, 10)
                 }
 
-                // Step Selector Chips (Matches Android UploadFotoPanel)
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("Tahap Foto Pemeriksaan")
-                        .font(.system(size: 13, weight: .bold))
-                        .foregroundStyle(colors.textSecondary)
+                // SECTION 1: Foto Kontainer
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack {
+                        Text("Foto Kontainer")
+                            .font(.system(size: 13.5, weight: .semibold))
+                            .foregroundStyle(sectionHeaderColor)
+                        Spacer()
+                        if isLoadingImages {
+                            ProgressView()
+                                .scaleEffect(0.75)
+                                .tint(sectionHeaderColor)
+                        } else {
+                            Button {
+                                Task { await loadImages() }
+                            } label: {
+                                HStack(spacing: 4) {
+                                    Image(systemName: "arrow.clockwise")
+                                    Text("Muat Ulang")
+                                }
+                                .font(.system(size: 11.5, weight: .semibold))
+                                .foregroundStyle(sectionHeaderColor)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .padding(.horizontal, 16)
+
+                    // Bounded scrollable card matching the CEISA/SIAP Foto Kontainer layout
+                    ScrollView(.vertical, showsIndicators: true) {
+                        VStack(alignment: .leading, spacing: 16) {
+                            ForEach(StepOption.containerPhotoSteps) { step in
+                                let stepPhotos = onlineImages.filter { step.matches($0.ketPraPemeriksaan) }
+                                FotoCategoryStripRow(
+                                    title: step.sectionTitle,
+                                    photos: stepPhotos,
+                                    colors: colors,
+                                    onTapAdd: {
+                                        activeAddStep = step
+                                        showSourceDialog = true
+                                    },
+                                    onTapPhoto: { item in
+                                        fullscreenImage = item
+                                    },
+                                    onDeletePhoto: { item in
+                                        deleteTarget = item
+                                    }
+                                )
+                            }
+
+                            if !unmatchedContainerImages.isEmpty {
+                                FotoCategoryStripRow(
+                                    title: "Foto Lainnya",
+                                    photos: unmatchedContainerImages,
+                                    colors: colors,
+                                    onTapAdd: {
+                                        activeAddStep = StepOption.containerPhotoSteps[0]
+                                        showSourceDialog = true
+                                    },
+                                    onTapPhoto: { item in
+                                        fullscreenImage = item
+                                    },
+                                    onDeletePhoto: { item in
+                                        deleteTarget = item
+                                    }
+                                )
+                            }
+                        }
                         .padding(.horizontal, 14)
-
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        HStack(spacing: 7) {
-                            ForEach(StepOption.allSteps) { step in
-                                let active = selectedStep.id == step.id
-                                Button { selectedStep = step } label: {
-                                    Text("\(step.id). \(step.label)")
-                                        .font(.system(size: 12, weight: .bold))
-                                        .padding(.horizontal, 12)
-                                        .padding(.vertical, 8)
-                                        .background(active ? colors.primaryAction : colors.surface)
-                                        .foregroundStyle(active ? colors.onPrimaryAction : colors.textPrimary)
-                                        .overlay(
-                                            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                                .stroke(active ? Color.clear : colors.cardBorder, lineWidth: 1)
-                                        )
-                                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                                }
-                                .buttonStyle(.plain)
-                            }
-                        }
-                        .padding(.horizontal, 12)
+                        .padding(.vertical, 14)
                     }
+                    .frame(height: 335)
+                    .background(colors.surface)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .stroke(colors.isDark ? colors.cardBorder : Color.black.opacity(0.05), lineWidth: 1)
+                    )
+                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    .shadow(color: Color.black.opacity(colors.isDark ? 0.28 : 0.08), radius: 8, x: 0, y: 3)
+                    .padding(.horizontal, 14)
                 }
+                .padding(.top, allContainers.count > 1 ? 0 : 10)
 
-                // Capture & Watermark Card
-                VStack(alignment: .leading, spacing: 12) {
-                    HStack {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("Watermark GPS + WIB")
-                                .font(.system(size: 13.5, weight: .bold))
-                                .foregroundStyle(colors.textPrimary)
-                            Text("GPS: \(locMgr.coordinateText)")
-                                .font(.system(size: 11.5, design: .monospaced))
-                                .foregroundStyle(colors.secondary)
-                        }
-                        Spacer()
-                        Toggle("", isOn: $watermarkEnabled)
-                            .labelsHidden()
-                            .tint(colors.primaryAction)
-                    }
-
-                    TextField("Keterangan / deskripsi foto (opsional)", text: $deskripsi)
-                        .font(.system(size: 13.5))
-                        .foregroundStyle(colors.textPrimary)
-                        .padding(11)
-                        .background(colors.surfaceElevated)
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                .stroke(colors.cardBorder, lineWidth: 1)
-                        )
-                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-
+                // SECTION 2: Tambah Barang >
+                Button {
+                    showBarangSheet = true
+                } label: {
                     HStack(spacing: 10) {
-                        SiapFilledButton(
-                            "Kamera",
-                            icon: "camera.fill",
-                            bg: colors.primaryAction,
-                            fg: colors.onPrimaryAction
-                        ) {
-                            pickerSource = UIImagePickerController.isSourceTypeAvailable(.camera) ? .camera : .photoLibrary
-                        }
-
-                        SiapOutlinedButton(
-                            "Galeri",
-                            icon: "photo.on.rectangle.angled",
-                            color: colors.secondary,
-                            bg: colors.surfaceElevated
-                        ) {
-                            pickerSource = .photoLibrary
-                        }
-                    }
-
-                    if let img = pickedImage {
-                        VStack(spacing: 10) {
-                            Image(uiImage: img)
-                                .resizable()
-                                .scaledToFit()
-                                .frame(maxHeight: 240)
-                                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-
-                            HStack(spacing: 8) {
-                                SiapOutlinedButton(
-                                    isOcrRunning ? "Memindai..." : "OCR Kontainer",
-                                    icon: "viewfinder",
-                                    color: colors.secondary,
-                                    bg: colors.surfaceElevated
-                                ) {
-                                    Task { await runOcr(on: img) }
-                                }
-                                .disabled(isOcrRunning)
-
-                                SiapOutlinedButton("Hapus", icon: "trash", color: colors.danger) {
-                                    pickedImage = nil
-                                }
-                                .frame(width: 105)
-                            }
-
-                            SiapFilledButton(
-                                isUploading ? "Mengunggah ke FTP & SIAP..." : "Unggah Foto Sekarang",
-                                icon: "icloud.and.arrow.up.fill",
-                                bg: colors.success,
-                                fg: colors.isDark ? Color(hex: 0x052E16) : .white,
-                                isLoading: isUploading
-                            ) {
-                                Task { await uploadPhoto(img) }
-                            }
-                            .disabled(isUploading)
-                        }
-                    }
-                }
-                .padding(14)
-                .background(colors.surface)
-                .overlay(
-                    RoundedRectangle(cornerRadius: 15, style: .continuous)
-                        .stroke(colors.cardBorder, lineWidth: 1)
-                )
-                .clipShape(RoundedRectangle(cornerRadius: 15, style: .continuous))
-                .padding(.horizontal, 12)
-
-                // Foto Terunggah Grid
-                VStack(alignment: .leading, spacing: 10) {
-                    HStack {
-                        Text("Foto Terunggah (\(onlineImages.count))")
-                            .font(.system(size: 14.5, weight: .bold))
-                            .foregroundStyle(colors.textPrimary)
+                        Text("Tambah Barang")
+                            .font(.system(size: 15.5, weight: .semibold))
+                            .foregroundStyle(colors.isDark ? colors.textPrimary : Color(hex: 0x0F2638))
                         Spacer()
+                        if barangImagesCount > 0 {
+                            Text("\(barangImagesCount) foto")
+                                .font(.system(size: 11.5, weight: .bold))
+                                .padding(.horizontal, 9)
+                                .padding(.vertical, 3)
+                                .background(colors.primaryContainer)
+                                .foregroundStyle(colors.onPrimaryContainer)
+                                .clipShape(Capsule())
+                        }
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 14, weight: .bold))
+                            .foregroundStyle(colors.isDark ? colors.textSecondary : Color(hex: 0x0F2638))
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 16)
+                    .background(colors.surface)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .stroke(colors.isDark ? colors.cardBorder : Color.black.opacity(0.05), lineWidth: 1)
+                    )
+                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    .shadow(color: Color.black.opacity(colors.isDark ? 0.25 : 0.08), radius: 8, x: 0, y: 3)
+                }
+                .buttonStyle(.plain)
+                .padding(.horizontal, 14)
+
+                // SECTION 3: Kontainer (Perintah Lorong, Ya/Tidak, Waktu Mulai, Update & Selesai)
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Kontainer")
+                        .font(.system(size: 13.5, weight: .semibold))
+                        .foregroundStyle(sectionHeaderColor)
+                        .padding(.horizontal, 16)
+
+                    VStack(alignment: .leading, spacing: 14) {
+                        HStack {
+                            Text("Perintah Lorong")
+                                .font(.system(size: 13.5))
+                                .foregroundStyle(colors.textHint)
+                            Spacer()
+                            Text(perintahLorongDisplay)
+                                .font(.system(size: 14, weight: .medium))
+                                .foregroundStyle(colors.textPrimary)
+                        }
+
+                        VStack(alignment: .leading, spacing: 10) {
+                            Text("Perintah lorong dilaksanakan")
+                                .font(.system(size: 13.5))
+                                .foregroundStyle(colors.textHint)
+
+                            SiapRadioRow(label: "Ya", selected: lorongDilaksanakanYa, colors: colors) {
+                                lorongDilaksanakanYa = true
+                            }
+
+                            SiapRadioRow(label: "Tidak", selected: !lorongDilaksanakanYa, colors: colors) {
+                                lorongDilaksanakanYa = false
+                            }
+                        }
+
+                        if !lorongDilaksanakanYa {
+                            VStack(alignment: .leading, spacing: 8) {
+                                Text("Alasan Tidak Lorong")
+                                    .font(.system(size: 12, weight: .semibold))
+                                    .foregroundStyle(colors.textHint)
+                                if !alasanOptions.isEmpty {
+                                    Menu {
+                                        ForEach(alasanOptions, id: \.self) { opt in
+                                            Button(opt) { alasanTidakLorong = opt }
+                                        }
+                                    } label: {
+                                        HStack {
+                                            Text(alasanTidakLorong == "-" || alasanTidakLorong.isEmpty ? "Pilih alasan tidak lorong..." : alasanTidakLorong)
+                                                .font(.system(size: 13))
+                                                .foregroundStyle(colors.textPrimary)
+                                                .lineLimit(1)
+                                            Spacer()
+                                            Image(systemName: "chevron.down")
+                                                .font(.system(size: 11, weight: .bold))
+                                                .foregroundStyle(colors.textHint)
+                                        }
+                                        .padding(10)
+                                        .background(colors.surfaceElevated)
+                                        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                                    }
+                                } else {
+                                    TextField("Alasan tidak dilaksanakan lorong", text: $alasanTidakLorong)
+                                        .font(.system(size: 13))
+                                        .padding(10)
+                                        .background(colors.surfaceElevated)
+                                        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                                }
+
+                                if !teknikOptions.isEmpty {
+                                    Text("Teknik Periksa")
+                                        .font(.system(size: 12, weight: .semibold))
+                                        .foregroundStyle(colors.textHint)
+                                    Menu {
+                                        ForEach(teknikOptions, id: \.self) { opt in
+                                            Button(opt) { teknikPeriksa = opt }
+                                        }
+                                    } label: {
+                                        HStack {
+                                            Text(teknikPeriksa == "-" || teknikPeriksa.isEmpty ? "Pilih teknik periksa..." : teknikPeriksa)
+                                                .font(.system(size: 13))
+                                                .foregroundStyle(colors.textPrimary)
+                                                .lineLimit(1)
+                                            Spacer()
+                                            Image(systemName: "chevron.down")
+                                                .font(.system(size: 11, weight: .bold))
+                                                .foregroundStyle(colors.textHint)
+                                        }
+                                        .padding(10)
+                                        .background(colors.surfaceElevated)
+                                        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                                    }
+                                }
+                            }
+                            .padding(.top, 2)
+                        }
+
+                        HStack {
+                            Text("Waktu Mulai")
+                                .font(.system(size: 13.5))
+                                .foregroundStyle(colors.textHint)
+                            Spacer()
+                            Text(waktuMulaiText)
+                                .font(.system(size: 13.5, weight: .medium, design: .monospaced))
+                                .foregroundStyle(colors.textSecondary)
+                        }
+
+                        // UPDATE DATA KONTAINER (Navy Button)
                         Button {
-                            Task { await loadImages() }
+                            Task { await updateContainerData() }
                         } label: {
-                            Image(systemName: "arrow.clockwise")
-                                .foregroundStyle(colors.primaryAction)
+                            HStack(spacing: 8) {
+                                if isUpdatingContainer {
+                                    ProgressView().tint(.white).scaleEffect(0.85)
+                                }
+                                Text(isUpdatingContainer ? "MEMPERBARUI..." : "UPDATE DATA KONTAINER")
+                                    .font(.system(size: 13.5, weight: .bold))
+                                    .tracking(0.3)
+                            }
+                            .foregroundStyle(.white)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 13.5)
+                            .background(navyActionColor)
+                            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
                         }
                         .buttonStyle(.plain)
-                    }
-                    .padding(.horizontal, 14)
+                        .disabled(isUpdatingContainer)
 
-                    if isLoadingImages {
-                        ProgressView().tint(colors.primaryAction).frame(maxWidth: .infinity).padding()
-                    } else if onlineImages.isEmpty {
-                        Text("Belum ada foto terunggah untuk \(selectedNokon).")
-                            .font(.system(size: 13))
-                            .foregroundStyle(colors.textHint)
-                            .padding(16)
-                            .frame(maxWidth: .infinity)
-                            .background(colors.surface)
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 13, style: .continuous)
-                                    .stroke(colors.cardBorder, lineWidth: 1)
-                            )
-                            .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
-                            .padding(.horizontal, 12)
-                    } else {
-                        let cols = [GridItem(.flexible(), spacing: 8), GridItem(.flexible(), spacing: 8), GridItem(.flexible(), spacing: 8)]
-                        LazyVGrid(columns: cols, spacing: 8) {
-                            ForEach(onlineImages) { item in
-                                ZStack(alignment: .topTrailing) {
-                                    Button {
-                                        fullscreenImage = item
-                                    } label: {
-                                        VStack(spacing: 4) {
-                                            if let url = item.resolvedURL {
-                                                AsyncImage(url: url) { phase in
-                                                    if let img = phase.image {
-                                                        img.resizable().scaledToFill()
-                                                    } else {
-                                                        colors.surfaceElevated
-                                                    }
-                                                }
-                                                .frame(height: 98)
-                                                .clipped()
-                                                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                                            }
-                                            Text(item.ketPraPemeriksaan.isEmpty ? "Foto #\(item.id)" : item.ketPraPemeriksaan)
-                                                .font(.system(size: 10.5, weight: .medium))
-                                                .foregroundStyle(colors.textSecondary)
-                                                .lineLimit(1)
-                                        }
-                                        .padding(6)
-                                        .background(colors.surface)
-                                        .overlay(
-                                            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                                .stroke(colors.cardBorder, lineWidth: 1)
-                                        )
-                                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                                    }
-                                    .buttonStyle(.plain)
-
-                                    Button {
-                                        deleteTarget = item
-                                    } label: {
-                                        Image(systemName: "xmark.circle.fill")
-                                            .font(.system(size: 18))
-                                            .foregroundStyle(colors.danger)
-                                            .background(Circle().fill(colors.surface))
-                                    }
-                                    .buttonStyle(.plain)
-                                    .padding(4)
+                        // SELESAI PERIKSA KONTAINER (Green Button)
+                        Button {
+                            showFinishConfirm = true
+                        } label: {
+                            HStack(spacing: 8) {
+                                if isFinishingContainer {
+                                    ProgressView().tint(.white).scaleEffect(0.85)
                                 }
+                                Text(isFinishingContainer ? "MENYELESAIKAN..." : "SELESAI PERIKSA KONTAINER")
+                                    .font(.system(size: 13.5, weight: .bold))
+                                    .tracking(0.3)
                             }
+                            .foregroundStyle(.white)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 13.5)
+                            .background(greenFinishColor)
+                            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
                         }
-                        .padding(.horizontal, 12)
+                        .buttonStyle(.plain)
+                        .disabled(isFinishingContainer)
                     }
+                    .padding(16)
+                    .background(colors.surface)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .stroke(colors.isDark ? colors.cardBorder : Color.black.opacity(0.05), lineWidth: 1)
+                    )
+                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    .shadow(color: Color.black.opacity(colors.isDark ? 0.28 : 0.08), radius: 8, x: 0, y: 3)
+                    .padding(.horizontal, 14)
                 }
             }
-            .padding(.bottom, 24)
+            .padding(.bottom, 26)
         }
         .onAppear {
             if selectedNokon.isEmpty { selectedNokon = initialNokon }
+            if waktuMulaiText.isEmpty {
+                let ip = pib.ipCeisa.trimmingCharacters(in: .whitespacesAndNewlines)
+                waktuMulaiText = (!ip.isEmpty && ip != "-") ? ip : SiapCrypto.wibFormatter("yyyy-MM-dd HH:mm:ss").string(from: Date())
+            }
+            syncContainerFormState()
             locMgr.request()
         }
         .task {
             if selectedNokon.isEmpty { selectedNokon = initialNokon }
-            await loadImages()
+            await loadContainerData()
+        }
+        .confirmationDialog("Tambah Foto \(activeAddStep.sectionTitle)", isPresented: $showSourceDialog, titleVisibility: .visible) {
+            if UIImagePickerController.isSourceTypeAvailable(.camera) {
+                Button("Ambil Foto (Kamera)") {
+                    pickerSource = .camera
+                }
+            }
+            Button("Pilih dari Galeri") {
+                pickerSource = .photoLibrary
+            }
+            Button("Batal", role: .cancel) {}
+        } message: {
+            Text("Kontainer \(selectedNokon) • \(activeAddStep.label)")
         }
         .sheet(item: Binding(
             get: { pickerSource.map { SourceTypeWrapper(source: $0) } },
             set: { if $0 == nil { pickerSource = nil } }
         )) { wrapper in
             ImagePicker(sourceType: wrapper.source) { img in
-                pickedImage = img
+                pendingUpload = PendingPhotoUpload(step: activeAddStep, image: img)
             }
         }
+        .sheet(item: $pendingUpload) { draft in
+            UploadPhotoConfirmSheet(
+                pib: pib,
+                nokon: selectedNokon,
+                ukuran: activeContainer?.ukuranContainer ?? "",
+                step: draft.step,
+                image: draft.image,
+                existingCount: onlineImages.count,
+                locMgr: locMgr,
+                watermarkEnabled: $watermarkEnabled,
+                pelLorong: lorongDilaksanakanYa ? "1" : "0",
+                alasanLorong: lorongDilaksanakanYa ? "-" : alasanTidakLorong,
+                teknikPeriksa: teknikPeriksa,
+                colors: colors,
+                onOcrContainerDetected: { found in
+                    selectedNokon = found
+                },
+                onUploaded: {
+                    Task { await loadImages() }
+                }
+            )
+            .environmentObject(app)
+            .preferredColorScheme(app.themeMode.preferredColorScheme)
+        }
+        .sheet(isPresented: $showBarangSheet) {
+            FotoBarangSheet(
+                pib: pib,
+                nokon: selectedNokon,
+                ukuran: activeContainer?.ukuranContainer ?? "",
+                onlineImages: onlineImages,
+                locMgr: locMgr,
+                watermarkEnabled: $watermarkEnabled,
+                pelLorong: lorongDilaksanakanYa ? "1" : "0",
+                alasanLorong: lorongDilaksanakanYa ? "-" : alasanTidakLorong,
+                teknikPeriksa: teknikPeriksa,
+                colors: colors,
+                onReloadImages: {
+                    await loadImages()
+                },
+                onDeleteImage: { item in
+                    deleteTarget = item
+                }
+            )
+            .environmentObject(app)
+            .preferredColorScheme(app.themeMode.preferredColorScheme)
+        }
         .sheet(item: $fullscreenImage) { item in
-            ZStack(alignment: .topTrailing) {
-                Color.black.ignoresSafeArea()
-                if let url = item.resolvedURL {
-                    AsyncImage(url: url) { phase in
-                        if let img = phase.image {
-                            img.resizable().scaledToFit().frame(maxWidth: .infinity, maxHeight: .infinity)
-                        } else {
-                            ProgressView().tint(.white)
-                        }
+            FotoFullscreenSheet(
+                item: item,
+                onClose: { fullscreenImage = nil },
+                onRequestDelete: {
+                    let target = item
+                    fullscreenImage = nil
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+                        deleteTarget = target
                     }
                 }
-                Button {
-                    fullscreenImage = nil
-                } label: {
-                    Text("Tutup")
-                        .font(.system(size: 14, weight: .bold))
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 8)
-                        .background(Color.white.opacity(0.2))
-                        .foregroundStyle(.white)
-                        .clipShape(Capsule())
-                }
-                .padding(18)
-            }
+            )
         }
         .alert("Hapus Foto?", isPresented: Binding(
             get: { deleteTarget != nil },
@@ -2291,8 +2458,51 @@ struct UploadFotoPanel: View {
                 }
             }
         } message: {
-            Text("Hapus foto ini dari pemeriksaan?")
+            Text("Hapus foto ini dari pemeriksaan kontainer \(selectedNokon)?")
         }
+        .alert("Selesai Periksa Kontainer?", isPresented: $showFinishConfirm) {
+            Button("Batal", role: .cancel) {}
+            Button("Ya, Selesai") {
+                Task { await finishContainerInspection() }
+            }
+        } message: {
+            Text("Tandai pemeriksaan kontainer \(selectedNokon) (PIB \(pib.noPib)) selesai?")
+        }
+    }
+
+    private func syncContainerFormState() {
+        if let c = activeContainer {
+            let p = c.pelaksanaanLorong.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            if p == "1" || p == "ya" || p == "true" {
+                lorongDilaksanakanYa = true
+            } else if p == "0" || p == "tidak" || p == "false" {
+                lorongDilaksanakanYa = (c.alasanLorong.isEmpty || c.alasanLorong == "-") ? true : false
+            }
+            if !c.alasanLorong.isEmpty && c.alasanLorong != "-" {
+                alasanTidakLorong = c.alasanLorong
+            }
+            if !c.teknikPeriksa.isEmpty && c.teknikPeriksa != "-" {
+                teknikPeriksa = c.teknikPeriksa
+            }
+        }
+    }
+
+    private func loadContainerData() async {
+        async let imgTask: Void = loadImages()
+        async let cekTask = SiapApiClient.shared.cekPelaksanaanLorong(kodeTiket: pib.kodeTiket, nokon: selectedNokon)
+        async let alasanTask = SiapApiClient.shared.fetchAlasanTidakLorong()
+        async let teknikTask = SiapApiClient.shared.fetchTeknikPeriksa()
+
+        _ = await imgTask
+        let cek = await cekTask
+        let alasan = await alasanTask
+        let teknik = await teknikTask
+
+        if cek == "1" {
+            lorongDilaksanakanYa = true
+        }
+        if !alasan.isEmpty { alasanOptions = alasan }
+        if !teknik.isEmpty { teknikOptions = teknik }
     }
 
     private func loadImages() async {
@@ -2301,40 +2511,480 @@ struct UploadFotoPanel: View {
         onlineImages = (try? await SiapApiClient.shared.fetchImages(kodeTiket: pib.kodeTiket, nokon: selectedNokon)) ?? []
     }
 
-    private func runOcr(on image: UIImage) async {
+    private func updateContainerData() async {
+        isUpdatingContainer = true
+        defer { isUpdatingContainer = false }
+        do {
+            _ = try await SiapApiClient.shared.insertInstruksiLorong(
+                kodeTiket: pib.kodeTiket,
+                noPib: pib.noPib,
+                tglPib: pib.tglPib,
+                nokon: selectedNokon,
+                instruksiLorong: perintahLorongDisplay,
+                lokasiPeriksa: locMgr.coordinateText,
+                ukuranKontainer: activeContainer?.ukuranContainer ?? "",
+                statusContainer: lorongDilaksanakanYa ? "1" : "0"
+            )
+            app.showToast("Data kontainer \(selectedNokon) berhasil diperbarui")
+        } catch {
+            app.showToast("Gagal update kontainer: \(error.localizedDescription)")
+        }
+    }
+
+    private func finishContainerInspection() async {
+        isFinishingContainer = true
+        defer { isFinishingContainer = false }
+        do {
+            try await SiapApiClient.shared.updateSelesaiPeriksa(kodeTiket: pib.kodeTiket)
+            app.showToast("Pemeriksaan kontainer \(selectedNokon) selesai")
+            await app.loadPibs()
+            app.activeUploadContext = nil
+        } catch {
+            app.showToast("Gagal menyelesaikan pemeriksaan: \(error.localizedDescription)")
+        }
+    }
+}
+
+// MARK: - Reusable Category Strip Row (Dashed "+" Box + Horizontal Uploaded Thumbnails)
+
+private struct FotoCategoryStripRow: View {
+    let title: String
+    let photos: [OnlineImageItem]
+    let colors: SiapColors
+    let onTapAdd: () -> Void
+    let onTapPhoto: (OnlineImageItem) -> Void
+    let onDeletePhoto: (OnlineImageItem) -> Void
+
+    private var tileSize: CGFloat { 96 }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 6) {
+                Text(title)
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(colors.isDark ? colors.textPrimary : Color(hex: 0x0F2638))
+                if !photos.isEmpty {
+                    Text("(\(photos.count))")
+                        .font(.system(size: 12.5, weight: .semibold))
+                        .foregroundStyle(colors.textHint)
+                }
+                Spacer()
+            }
+
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 12) {
+                    // Add Photo "+" Tile with Dashed Inner Frame (Matches Screenshot)
+                    Button(action: onTapAdd) {
+                        ZStack {
+                            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                .fill(colors.isDark ? colors.surfaceElevated : Color(hex: 0xF0F1F4))
+                                .frame(width: tileSize, height: tileSize)
+                                .shadow(color: Color.black.opacity(colors.isDark ? 0.22 : 0.10), radius: 5, x: 0, y: 2)
+
+                            RoundedRectangle(cornerRadius: 4, style: .continuous)
+                                .stroke(
+                                    colors.isDark ? colors.textHint.opacity(0.85) : Color(hex: 0x3D4F6F),
+                                    style: StrokeStyle(lineWidth: 1.4, dash: [4, 3])
+                                )
+                                .frame(width: tileSize - 18, height: tileSize - 18)
+
+                            Image(systemName: "plus")
+                                .font(.system(size: 30, weight: .bold))
+                                .foregroundStyle(colors.isDark ? SiapColors.brandAmber : Color.white)
+                                .shadow(color: Color.black.opacity(colors.isDark ? 0 : 0.08), radius: 1, y: 1)
+                        }
+                        .padding(.vertical, 3)
+                        .padding(.leading, 2)
+                    }
+                    .buttonStyle(.plain)
+
+                    // Uploaded Photos in Matching White/Surface Rounded Frames
+                    ForEach(photos) { item in
+                        ZStack(alignment: .topTrailing) {
+                            Button {
+                                onTapPhoto(item)
+                            } label: {
+                                Group {
+                                    if let url = item.resolvedURL {
+                                        AsyncImage(url: url) { phase in
+                                            switch phase {
+                                            case .success(let img):
+                                                img.resizable().scaledToFill()
+                                            case .failure:
+                                                ZStack {
+                                                    colors.surfaceElevated
+                                                    Image(systemName: "photo")
+                                                        .foregroundStyle(colors.textHint)
+                                                }
+                                            default:
+                                                ZStack {
+                                                    colors.surfaceElevated
+                                                    ProgressView().scaleEffect(0.75)
+                                                }
+                                            }
+                                        }
+                                    } else {
+                                        colors.surfaceElevated
+                                    }
+                                }
+                                .frame(width: tileSize - 8, height: tileSize - 8)
+                                .clipped()
+                                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                                .padding(4)
+                                .background(colors.isDark ? colors.surfaceElevated : Color.white)
+                                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                                .shadow(color: Color.black.opacity(colors.isDark ? 0.25 : 0.12), radius: 5, x: 0, y: 2)
+                                .padding(.vertical, 3)
+                            }
+                            .buttonStyle(.plain)
+
+                            Button {
+                                onDeletePhoto(item)
+                            } label: {
+                                Image(systemName: "xmark.circle.fill")
+                                    .font(.system(size: 18))
+                                    .foregroundStyle(colors.danger)
+                                    .background(Circle().fill(colors.surface).padding(1))
+                            }
+                            .buttonStyle(.plain)
+                            .offset(x: 3, y: -1)
+                        }
+                    }
+                }
+                .padding(.trailing, 6)
+            }
+        }
+    }
+}
+
+// MARK: - Authentic Radio Button Row (Yellow-Gold Selected Ring)
+
+private struct SiapRadioRow: View {
+    let label: String
+    let selected: Bool
+    let colors: SiapColors
+    let action: () -> Void
+
+    private let activeGold = Color(hex: 0xEAB308)
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 10) {
+                ZStack {
+                    Circle()
+                        .stroke(selected ? activeGold : colors.outline, lineWidth: 2)
+                        .frame(width: 21, height: 21)
+                    if selected {
+                        Circle()
+                            .fill(activeGold.opacity(0.22))
+                            .frame(width: 17, height: 17)
+                        Circle()
+                            .fill(activeGold)
+                            .frame(width: 9, height: 9)
+                    }
+                }
+                Text(label)
+                    .font(.system(size: 14, weight: selected ? .semibold : .regular))
+                    .foregroundStyle(colors.textSecondary)
+                Spacer()
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+// MARK: - Foto Barang Dedicated Sheet ("Tambah Barang >")
+
+private struct FotoBarangSheet: View {
+    @EnvironmentObject var app: AppState
+    @Environment(\.dismiss) private var dismiss
+    let pib: PibDocument
+    let nokon: String
+    let ukuran: String
+    let onlineImages: [OnlineImageItem]
+    @ObservedObject var locMgr: LocationManager
+    @Binding var watermarkEnabled: Bool
+    let pelLorong: String
+    let alasanLorong: String
+    let teknikPeriksa: String
+    let colors: SiapColors
+    let onReloadImages: () async -> Void
+    let onDeleteImage: (OnlineImageItem) -> Void
+
+    @State private var activeStep: StepOption = StepOption.barangPhotoSteps[0]
+    @State private var showSourceDialog = false
+    @State private var pickerSource: UIImagePickerController.SourceType?
+    @State private var pendingUpload: PendingPhotoUpload?
+    @State private var previewItem: OnlineImageItem?
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    VStack(alignment: .leading, spacing: 16) {
+                        ForEach(StepOption.barangPhotoSteps) { step in
+                            let stepPhotos = onlineImages.filter { step.matches($0.ketPraPemeriksaan) }
+                            FotoCategoryStripRow(
+                                title: step.sectionTitle,
+                                photos: stepPhotos,
+                                colors: colors,
+                                onTapAdd: {
+                                    activeStep = step
+                                    showSourceDialog = true
+                                },
+                                onTapPhoto: { item in
+                                    previewItem = item
+                                },
+                                onDeletePhoto: { item in
+                                    onDeleteImage(item)
+                                }
+                            )
+                        }
+                    }
+                    .padding(14)
+                    .background(colors.surface)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .stroke(colors.isDark ? colors.cardBorder : Color.black.opacity(0.05), lineWidth: 1)
+                    )
+                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    .shadow(color: Color.black.opacity(colors.isDark ? 0.25 : 0.08), radius: 8, x: 0, y: 3)
+                    .padding(14)
+                }
+            }
+            .background(colors.backdrop.ignoresSafeArea())
+            .navigationTitle("Foto Barang : \(nokon)")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button("Tutup") { dismiss() }
+                        .font(.system(size: 14, weight: .bold))
+                }
+            }
+        }
+        .confirmationDialog("Tambah \(activeStep.label)", isPresented: $showSourceDialog, titleVisibility: .visible) {
+            if UIImagePickerController.isSourceTypeAvailable(.camera) {
+                Button("Ambil Foto (Kamera)") { pickerSource = .camera }
+            }
+            Button("Pilih dari Galeri") { pickerSource = .photoLibrary }
+            Button("Batal", role: .cancel) {}
+        }
+        .sheet(item: Binding(
+            get: { pickerSource.map { SourceTypeWrapper(source: $0) } },
+            set: { if $0 == nil { pickerSource = nil } }
+        )) { wrapper in
+            ImagePicker(sourceType: wrapper.source) { img in
+                pendingUpload = PendingPhotoUpload(step: activeStep, image: img)
+            }
+        }
+        .sheet(item: $pendingUpload) { draft in
+            UploadPhotoConfirmSheet(
+                pib: pib,
+                nokon: nokon,
+                ukuran: ukuran,
+                step: draft.step,
+                image: draft.image,
+                existingCount: onlineImages.count,
+                locMgr: locMgr,
+                watermarkEnabled: $watermarkEnabled,
+                pelLorong: pelLorong,
+                alasanLorong: alasanLorong,
+                teknikPeriksa: teknikPeriksa,
+                colors: colors,
+                onOcrContainerDetected: { _ in },
+                onUploaded: {
+                    Task { await onReloadImages() }
+                }
+            )
+            .environmentObject(app)
+            .preferredColorScheme(app.themeMode.preferredColorScheme)
+        }
+        .sheet(item: $previewItem) { item in
+            FotoFullscreenSheet(
+                item: item,
+                onClose: { previewItem = nil },
+                onRequestDelete: {
+                    let target = item
+                    previewItem = nil
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+                        onDeleteImage(target)
+                    }
+                }
+            )
+        }
+    }
+}
+
+// MARK: - Upload Photo Preview & Confirmation Sheet
+
+private struct UploadPhotoConfirmSheet: View {
+    @EnvironmentObject var app: AppState
+    @Environment(\.dismiss) private var dismiss
+    let pib: PibDocument
+    let nokon: String
+    let ukuran: String
+    let step: StepOption
+    let image: UIImage
+    let existingCount: Int
+    @ObservedObject var locMgr: LocationManager
+    @Binding var watermarkEnabled: Bool
+    let pelLorong: String
+    let alasanLorong: String
+    let teknikPeriksa: String
+    let colors: SiapColors
+    let onOcrContainerDetected: (String) -> Void
+    let onUploaded: () -> Void
+
+    @State private var seriBarang = ""
+    @State private var deskripsi = ""
+    @State private var jumlahKemasan = ""
+    @State private var isUploading = false
+    @State private var isOcrRunning = false
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
+                    HStack(spacing: 8) {
+                        Image(systemName: "camera.viewfinder")
+                            .foregroundStyle(colors.primaryAction)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(step.sectionTitle)
+                                .font(.system(size: 15, weight: .bold))
+                                .foregroundStyle(colors.textPrimary)
+                            Text("Kontainer \(nokon) • \(step.label)")
+                                .font(.system(size: 12))
+                                .foregroundStyle(colors.textHint)
+                        }
+                        Spacer()
+                    }
+                    .padding(12)
+                    .background(colors.surface)
+                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+
+                    Image(uiImage: image)
+                        .resizable()
+                        .scaledToFit()
+                        .frame(maxWidth: .infinity, maxHeight: 270)
+                        .background(Color.black.opacity(0.06))
+                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+
+                    VStack(alignment: .leading, spacing: 11) {
+                        HStack {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Watermark GPS + WIB")
+                                    .font(.system(size: 13.5, weight: .bold))
+                                    .foregroundStyle(colors.textPrimary)
+                                Text("GPS: \(locMgr.coordinateText)")
+                                    .font(.system(size: 11.5, design: .monospaced))
+                                    .foregroundStyle(colors.secondary)
+                            }
+                            Spacer()
+                            Toggle("", isOn: $watermarkEnabled)
+                                .labelsHidden()
+                                .tint(colors.primaryAction)
+                        }
+
+                        if step.isBarangStep {
+                            TextField("Seri barang (contoh: 1, 2, dst.)", text: $seriBarang)
+                                .keyboardType(.numberPad)
+                                .font(.system(size: 13.5))
+                                .padding(11)
+                                .background(colors.surfaceElevated)
+                                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+
+                            TextField("Jumlah & jenis kemasan (opsional)", text: $jumlahKemasan)
+                                .font(.system(size: 13.5))
+                                .padding(11)
+                                .background(colors.surfaceElevated)
+                                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                        }
+
+                        TextField(step.isBarangStep ? "Uraian / keterangan barang (opsional)" : "Keterangan foto (opsional)", text: $deskripsi)
+                            .font(.system(size: 13.5))
+                            .foregroundStyle(colors.textPrimary)
+                            .padding(11)
+                            .background(colors.surfaceElevated)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                    .stroke(colors.cardBorder, lineWidth: 1)
+                            )
+                            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+
+                        if !step.isBarangStep {
+                            SiapOutlinedButton(
+                                isOcrRunning ? "Memindai OCR..." : "OCR Nomor Kontainer",
+                                icon: "viewfinder",
+                                color: colors.secondary,
+                                bg: colors.surfaceElevated
+                            ) {
+                                Task { await runOcr() }
+                            }
+                            .disabled(isOcrRunning)
+                        }
+
+                        SiapFilledButton(
+                            isUploading ? "Mengunggah ke FTP & SIAP..." : "Unggah Foto Sekarang",
+                            icon: "icloud.and.arrow.up.fill",
+                            bg: Color(hex: 0x4BD367),
+                            fg: .white,
+                            isLoading: isUploading
+                        ) {
+                            Task { await performUpload() }
+                        }
+                        .disabled(isUploading)
+                    }
+                    .padding(14)
+                    .background(colors.surface)
+                    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                }
+                .padding(14)
+            }
+            .background(colors.backdrop.ignoresSafeArea())
+            .navigationTitle("Unggah Foto")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Button("Batal") { dismiss() }
+                }
+            }
+        }
+    }
+
+    private func runOcr() async {
         isOcrRunning = true
         defer { isOcrRunning = false }
         if let found = await ContainerOcrScanner.scanContainerNumber(from: image) {
-            selectedNokon = found
+            onOcrContainerDetected(found)
             app.showToast("OCR Kontainer terdeteksi: \(found)")
         } else {
             app.showToast("Nomor kontainer tidak terdeteksi di foto")
         }
     }
 
-    private func uploadPhoto(_ raw: UIImage) async {
+    private func performUpload() async {
         isUploading = true
         defer { isUploading = false }
         let monthFolder = SiapCrypto.currentMonthYear()
         let waktu = SiapCrypto.currentExifTimestamp()
-        let isLcl = pib.isLclDefault || selectedNokon.uppercased() == "LCL"
-        let activeUkuran = allContainers.first(where: { $0.noContainer == selectedNokon })?.ukuranContainer ?? ""
+        let isLcl = pib.isLclDefault || nokon.uppercased() == "LCL"
         let fileName = SiapCrypto.buildInspectionFileName(
             kodeTiket: pib.kodeTiket,
             isLcl: isLcl,
-            nokon: selectedNokon,
+            nokon: nokon,
             waktuFoto: waktu,
-            stepLabel: selectedStep.label,
-            stepCode: selectedStep.code,
-            urutanBarang: "\(onlineImages.count + 1)",
+            stepLabel: step.label,
+            stepCode: step.code,
+            urutanBarang: "\(existingCount + 1)",
             ext: "jpg"
         )
         guard let jpegData = ImageWatermarkProcessor.process(
-            image: raw,
+            image: image,
             watermark: watermarkEnabled,
             noPib: pib.noPib,
-            nokon: selectedNokon,
-            stepLabel: selectedStep.label,
+            nokon: nokon,
+            stepLabel: step.label,
             lokasi: locMgr.coordinateText
         ) else {
             app.showToast("Gagal memproses gambar")
@@ -2345,23 +2995,83 @@ struct UploadFotoPanel: View {
             _ = try await SiapApiClient.shared.insertImage(
                 isLcl: isLcl,
                 kodeTiket: pib.kodeTiket,
-                nokon: selectedNokon,
+                nokon: nokon,
                 urlImage: "\(monthFolder)/\(fileName)",
-                stepLabel: selectedStep.label,
-                seriBarang: "",
+                stepLabel: step.label,
+                seriBarang: seriBarang,
                 ketSeriBarang: deskripsi,
                 lokasi: locMgr.coordinateText,
-                ukuran: activeUkuran,
+                ukuran: ukuran,
                 waktuFoto: waktu,
                 uraianBarang: deskripsi,
-                jumlahJenisKemasan: ""
+                jumlahJenisKemasan: jumlahKemasan,
+                pelLorong: pelLorong,
+                alasanLorong: alasanLorong,
+                teknikPeriksa: teknikPeriksa
             )
-            pickedImage = nil
-            deskripsi = ""
-            app.showToast("Foto berhasil diunggah!")
-            await loadImages()
+            app.showToast("Foto \(step.sectionTitle) berhasil diunggah!")
+            onUploaded()
+            dismiss()
         } catch {
             app.showToast("Upload gagal: \(error.localizedDescription)")
+        }
+    }
+}
+
+// MARK: - Fullscreen Image Preview Sheet
+
+private struct FotoFullscreenSheet: View {
+    let item: OnlineImageItem
+    let onClose: () -> Void
+    let onRequestDelete: () -> Void
+
+    var body: some View {
+        ZStack {
+            Color.black.ignoresSafeArea()
+            if let url = item.resolvedURL {
+                AsyncImage(url: url) { phase in
+                    if let img = phase.image {
+                        img.resizable().scaledToFit().frame(maxWidth: .infinity, maxHeight: .infinity)
+                    } else {
+                        ProgressView().tint(.white)
+                    }
+                }
+            }
+            VStack {
+                HStack {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(item.ketPraPemeriksaan.isEmpty ? "Foto #\(item.id)" : item.ketPraPemeriksaan)
+                            .font(.system(size: 14, weight: .bold))
+                            .foregroundStyle(.white)
+                        if !item.ketSeriBarang.isEmpty && item.ketSeriBarang != "-" {
+                            Text(item.ketSeriBarang)
+                                .font(.system(size: 12))
+                                .foregroundStyle(.white.opacity(0.8))
+                        }
+                    }
+                    Spacer()
+                    Button(action: onRequestDelete) {
+                        Image(systemName: "trash.fill")
+                            .font(.system(size: 14, weight: .bold))
+                            .padding(10)
+                            .background(Color.red.opacity(0.85))
+                            .foregroundStyle(.white)
+                            .clipShape(Circle())
+                    }
+                    Button(action: onClose) {
+                        Text("Tutup")
+                            .font(.system(size: 14, weight: .bold))
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 8)
+                            .background(Color.white.opacity(0.22))
+                            .foregroundStyle(.white)
+                            .clipShape(Capsule())
+                    }
+                }
+                .padding(16)
+                .background(Color.black.opacity(0.45))
+                Spacer()
+            }
         }
     }
 }

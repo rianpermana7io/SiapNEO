@@ -235,7 +235,7 @@ struct SiapTopAppBar: View {
             return dokap.title
         }
         if let up = app.activeUploadContext {
-            return "Upload • \(up.nokon)"
+            return "Kontainer : \(up.nokon)"
         }
         if let pib = app.selectedPib {
             return "PIB \(pib.noPib)"

@@ -217,6 +217,57 @@ struct StepOption: Identifiable, Hashable {
     let code: String
     let label: String
 
+    /// Short section title matching the CEISA/SIAP Foto Kontainer card UI
+    var sectionTitle: String {
+        switch code {
+        case "1": return "ID Card PJ"
+        case "2": return "Segel"
+        case "3": return "Kontainer Tertutup"
+        case "4": return "Kontainer Buka Setengah"
+        case "5": return "Kontainer Buka Seluruh"
+        case "6": return "Foto Barang"
+        case "7": return "Lorong"
+        case "8": return "Kemasan Barang"
+        case "9": return "Barang Contoh"
+        default: return label
+        }
+    }
+
+    var isBarangStep: Bool {
+        code == "6" || code == "8" || code == "9"
+    }
+
+    func matches(_ ketPraPemeriksaan: String) -> Bool {
+        let norm = ketPraPemeriksaan
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        if norm == label.lowercased() || norm == sectionTitle.lowercased() {
+            return true
+        }
+        switch code {
+        case "2":
+            return norm.contains("segel")
+        case "3":
+            return norm.contains("tertutup")
+        case "4":
+            return norm.contains("setengah")
+        case "5":
+            return norm.contains("seluruh") || norm.contains("penuh") || norm.contains("terbuka penuh")
+        case "7":
+            return norm.contains("lorong")
+        case "1":
+            return norm.contains("id card") || norm.contains("id_card") || norm.contains("idcard")
+        case "8":
+            return norm.contains("kemasan")
+        case "9":
+            return norm.contains("contoh") || norm.contains("barcon")
+        case "6":
+            return norm.contains("barang") && !norm.contains("kemasan") && !norm.contains("contoh")
+        default:
+            return false
+        }
+    }
+
     static let allSteps: [StepOption] = [
         StepOption(code: "1", label: "ID Card PJ"),
         StepOption(code: "2", label: "Foto Segel"),
@@ -225,6 +276,23 @@ struct StepOption: Identifiable, Hashable {
         StepOption(code: "5", label: "Foto Kontainer Buka Seluruh"),
         StepOption(code: "6", label: "Foto Barang"),
         StepOption(code: "7", label: "Foto Lorong"),
+        StepOption(code: "8", label: "Foto Kemasan Barang"),
+        StepOption(code: "9", label: "Foto Barang Contoh")
+    ]
+
+    /// Ordered categories displayed inside the "Foto Kontainer" card (matches screenshot order)
+    static let containerPhotoSteps: [StepOption] = [
+        StepOption(code: "2", label: "Foto Segel"),
+        StepOption(code: "3", label: "Foto Kontainer Tertutup"),
+        StepOption(code: "4", label: "Foto Kontainer Buka Setengah"),
+        StepOption(code: "5", label: "Foto Kontainer Buka Seluruh"),
+        StepOption(code: "7", label: "Foto Lorong"),
+        StepOption(code: "1", label: "ID Card PJ")
+    ]
+
+    /// Ordered categories displayed inside the "Tambah Barang" sheet
+    static let barangPhotoSteps: [StepOption] = [
+        StepOption(code: "6", label: "Foto Barang"),
         StepOption(code: "8", label: "Foto Kemasan Barang"),
         StepOption(code: "9", label: "Foto Barang Contoh")
     ]
