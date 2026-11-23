@@ -1969,6 +1969,36 @@ private struct PendingPhotoUpload: Identifiable {
     let image: UIImage
 }
 
+private enum UploadPanelSheet: Identifiable {
+    case gallery
+    case confirm(PendingPhotoUpload)
+    case barang
+    case fullscreen(OnlineImageItem)
+
+    var id: String {
+        switch self {
+        case .gallery: return "gallery"
+        case .confirm(let d): return "confirm_\(d.id.uuidString)"
+        case .barang: return "barang"
+        case .fullscreen(let item): return "full_\(item.id)"
+        }
+    }
+}
+
+private enum BarangPanelSheet: Identifiable {
+    case gallery
+    case confirm(PendingPhotoUpload)
+    case fullscreen(OnlineImageItem)
+
+    var id: String {
+        switch self {
+        case .gallery: return "barang_gallery"
+        case .confirm(let d): return "barang_confirm_\(d.id.uuidString)"
+        case .fullscreen(let item): return "barang_full_\(item.id)"
+        }
+    }
+}
+
 struct UploadFotoPanel: View {
     @EnvironmentObject var app: AppState
     let pib: PibDocument
@@ -1980,14 +2010,13 @@ struct UploadFotoPanel: View {
     @State private var selectedNokon = ""
     @State private var activeAddStep: StepOption = StepOption.containerPhotoSteps[0]
     @State private var showSourceDialog = false
-    @State private var pickerSource: UIImagePickerController.SourceType?
-    @State private var pendingUpload: PendingPhotoUpload?
+    @State private var showCameraCover = false
+    @State private var activeSheet: UploadPanelSheet?
+    @State private var capturedDraftTemp: PendingPhotoUpload?
     @State private var watermarkEnabled = true
     @State private var onlineImages: [OnlineImageItem] = []
     @State private var isLoadingImages = false
-    @State private var fullscreenImage: OnlineImageItem?
     @State private var deleteTarget: OnlineImageItem?
-    @State private var showBarangSheet = false
 
     // Kontainer section state (Perintah Lorong, Ya/Tidak, Waktu Mulai)
     @State private var lorongDilaksanakanYa = true
@@ -2110,7 +2139,7 @@ struct UploadFotoPanel: View {
                                         showSourceDialog = true
                                     },
                                     onTapPhoto: { item in
-                                        fullscreenImage = item
+                                        activeSheet = .fullscreen(item)
                                     },
                                     onDeletePhoto: { item in
                                         deleteTarget = item
@@ -2128,7 +2157,7 @@ struct UploadFotoPanel: View {
                                         showSourceDialog = true
                                     },
                                     onTapPhoto: { item in
-                                        fullscreenImage = item
+                                        activeSheet = .fullscreen(item)
                                     },
                                     onDeletePhoto: { item in
                                         deleteTarget = item
@@ -2153,7 +2182,7 @@ struct UploadFotoPanel: View {
 
                 // SECTION 2: Tambah Barang >
                 Button {
-                    showBarangSheet = true
+                    activeSheet = .barang
                 } label: {
                     HStack(spacing: 10) {
                         Text("Tambah Barang")
@@ -2311,6 +2340,9 @@ struct UploadFotoPanel: View {
             syncContainerFormState()
             locMgr.request()
         }
+        .onDisappear {
+            locMgr.stop()
+        }
         .task {
             if selectedNokon.isEmpty { selectedNokon = initialNokon }
             await loadContainerData()
@@ -2318,82 +2350,92 @@ struct UploadFotoPanel: View {
         .confirmationDialog("Tambah Foto \(activeAddStep.sectionTitle)", isPresented: $showSourceDialog, titleVisibility: .visible) {
             if UIImagePickerController.isSourceTypeAvailable(.camera) {
                 Button("Ambil Foto (Kamera)") {
-                    pickerSource = .camera
+                    openCameraAfterDialog()
                 }
             }
             Button("Pilih dari Galeri") {
-                pickerSource = .photoLibrary
+                openGalleryAfterDialog()
             }
             Button("Batal", role: .cancel) {}
         } message: {
             Text("Kontainer \(selectedNokon) • \(activeAddStep.label)")
         }
-        .sheet(item: Binding(
-            get: { pickerSource.map { SourceTypeWrapper(source: $0) } },
-            set: { if $0 == nil { pickerSource = nil } }
-        )) { wrapper in
-            ImagePicker(sourceType: wrapper.source) { img in
-                pendingUpload = PendingPhotoUpload(step: activeAddStep, image: img)
+        .fullScreenCover(isPresented: $showCameraCover, onDismiss: {
+            flushCapturedDraft()
+        }) {
+            ZStack {
+                Color.black.ignoresSafeArea()
+                ImagePicker(sourceType: .camera) { img in
+                    capturedDraftTemp = PendingPhotoUpload(step: activeAddStep, image: img)
+                }
+                .ignoresSafeArea()
             }
         }
-        .sheet(item: $pendingUpload) { draft in
-            UploadPhotoConfirmSheet(
-                pib: pib,
-                nokon: selectedNokon,
-                ukuran: activeContainer?.ukuranContainer ?? "",
-                step: draft.step,
-                image: draft.image,
-                existingCount: onlineImages.count,
-                locMgr: locMgr,
-                watermarkEnabled: $watermarkEnabled,
-                pelLorong: lorongDilaksanakanYa ? "1" : "0",
-                alasanLorong: lorongDilaksanakanYa ? "-" : alasanTidakLorong,
-                teknikPeriksa: teknikPeriksa,
-                colors: colors,
-                onOcrContainerDetected: { found in
-                    selectedNokon = found
-                },
-                onUploaded: {
-                    Task { await loadImages() }
+        .sheet(item: $activeSheet, onDismiss: {
+            flushCapturedDraft()
+        }) { sheet in
+            switch sheet {
+            case .gallery:
+                ImagePicker(sourceType: .photoLibrary) { img in
+                    capturedDraftTemp = PendingPhotoUpload(step: activeAddStep, image: img)
                 }
-            )
-            .environmentObject(app)
-            .preferredColorScheme(app.themeMode.preferredColorScheme)
-        }
-        .sheet(isPresented: $showBarangSheet) {
-            FotoBarangSheet(
-                pib: pib,
-                nokon: selectedNokon,
-                ukuran: activeContainer?.ukuranContainer ?? "",
-                onlineImages: onlineImages,
-                locMgr: locMgr,
-                watermarkEnabled: $watermarkEnabled,
-                pelLorong: lorongDilaksanakanYa ? "1" : "0",
-                alasanLorong: lorongDilaksanakanYa ? "-" : alasanTidakLorong,
-                teknikPeriksa: teknikPeriksa,
-                colors: colors,
-                onReloadImages: {
-                    await loadImages()
-                },
-                onDeleteImage: { item in
-                    deleteTarget = item
-                }
-            )
-            .environmentObject(app)
-            .preferredColorScheme(app.themeMode.preferredColorScheme)
-        }
-        .sheet(item: $fullscreenImage) { item in
-            FotoFullscreenSheet(
-                item: item,
-                onClose: { fullscreenImage = nil },
-                onRequestDelete: {
-                    let target = item
-                    fullscreenImage = nil
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
-                        deleteTarget = target
+            case .confirm(let draft):
+                UploadPhotoConfirmSheet(
+                    pib: pib,
+                    nokon: selectedNokon,
+                    ukuran: activeContainer?.ukuranContainer ?? "",
+                    step: draft.step,
+                    image: draft.image,
+                    existingCount: onlineImages.count,
+                    locMgr: locMgr,
+                    watermarkEnabled: $watermarkEnabled,
+                    pelLorong: lorongDilaksanakanYa ? "1" : "0",
+                    alasanLorong: lorongDilaksanakanYa ? "-" : alasanTidakLorong,
+                    teknikPeriksa: teknikPeriksa,
+                    colors: colors,
+                    onOcrContainerDetected: { found in
+                        selectedNokon = found
+                    },
+                    onUploaded: {
+                        Task { await loadImages() }
                     }
-                }
-            )
+                )
+                .environmentObject(app)
+                .preferredColorScheme(app.themeMode.preferredColorScheme)
+            case .barang:
+                FotoBarangSheet(
+                    pib: pib,
+                    nokon: selectedNokon,
+                    ukuran: activeContainer?.ukuranContainer ?? "",
+                    onlineImages: onlineImages,
+                    locMgr: locMgr,
+                    watermarkEnabled: $watermarkEnabled,
+                    pelLorong: lorongDilaksanakanYa ? "1" : "0",
+                    alasanLorong: lorongDilaksanakanYa ? "-" : alasanTidakLorong,
+                    teknikPeriksa: teknikPeriksa,
+                    colors: colors,
+                    onReloadImages: {
+                        await loadImages()
+                    },
+                    onDeleteImage: { item in
+                        deleteTarget = item
+                    }
+                )
+                .environmentObject(app)
+                .preferredColorScheme(app.themeMode.preferredColorScheme)
+            case .fullscreen(let item):
+                FotoFullscreenSheet(
+                    item: item,
+                    onClose: { activeSheet = nil },
+                    onRequestDelete: {
+                        let target = item
+                        activeSheet = nil
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                            deleteTarget = target
+                        }
+                    }
+                )
+            }
         }
         .alert("Hapus Foto?", isPresented: Binding(
             get: { deleteTarget != nil },
@@ -2416,6 +2458,33 @@ struct UploadFotoPanel: View {
             }
         } message: {
             Text("Hapus foto ini dari pemeriksaan kontainer \(selectedNokon)?")
+        }
+    }
+
+    private func openCameraAfterDialog() {
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 280_000_000)
+            let granted = await CameraPermissionHelper.ensureCameraAccess()
+            if granted {
+                showCameraCover = true
+            } else {
+                app.showToast("Izin kamera belum aktif — buka Pengaturan > SIAP NEO > Kamera")
+            }
+        }
+    }
+
+    private func openGalleryAfterDialog() {
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 280_000_000)
+            activeSheet = .gallery
+        }
+    }
+
+    private func flushCapturedDraft() {
+        guard let draft = capturedDraftTemp else { return }
+        capturedDraftTemp = nil
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+            activeSheet = .confirm(draft)
         }
     }
 
@@ -2630,9 +2699,9 @@ private struct FotoBarangSheet: View {
 
     @State private var activeStep: StepOption = StepOption.barangPhotoSteps[0]
     @State private var showSourceDialog = false
-    @State private var pickerSource: UIImagePickerController.SourceType?
-    @State private var pendingUpload: PendingPhotoUpload?
-    @State private var previewItem: OnlineImageItem?
+    @State private var showCameraCover = false
+    @State private var activeSheet: BarangPanelSheet?
+    @State private var capturedDraftTemp: PendingPhotoUpload?
 
     // CEISA 4.0 #detail__Barang form fields
     @State private var seriBarang = "1"
@@ -2691,7 +2760,7 @@ private struct FotoBarangSheet: View {
                                         showSourceDialog = true
                                     },
                                     onTapPhoto: { item in
-                                        previewItem = item
+                                        activeSheet = .fullscreen(item)
                                     },
                                     onDeletePhoto: { item in
                                         onDeleteImage(item)
@@ -2950,7 +3019,7 @@ private struct FotoBarangSheet: View {
                             // Quick Capture Buttons (directly attaches all CEISA 4.0 fields!)
                             Button {
                                 activeStep = StepOption.barangPhotoSteps[0]
-                                pickerSource = UIImagePickerController.isSourceTypeAvailable(.camera) ? .camera : .photoLibrary
+                                openCameraDirect()
                             } label: {
                                 HStack(spacing: 8) {
                                     Image(systemName: "camera.fill")
@@ -2968,7 +3037,7 @@ private struct FotoBarangSheet: View {
 
                             Button {
                                 activeStep = StepOption.barangPhotoSteps[0]
-                                pickerSource = .photoLibrary
+                                activeSheet = .gallery
                             } label: {
                                 HStack(spacing: 8) {
                                     Image(systemName: "photo.on.rectangle.angled")
@@ -3016,59 +3085,108 @@ private struct FotoBarangSheet: View {
         }
         .confirmationDialog("Tambah \(activeStep.label)", isPresented: $showSourceDialog, titleVisibility: .visible) {
             if UIImagePickerController.isSourceTypeAvailable(.camera) {
-                Button("Ambil Foto (Kamera)") { pickerSource = .camera }
+                Button("Ambil Foto (Kamera)") { openCameraAfterDialog() }
             }
-            Button("Pilih dari Galeri") { pickerSource = .photoLibrary }
+            Button("Pilih dari Galeri") { openGalleryAfterDialog() }
             Button("Batal", role: .cancel) {}
         }
-        .sheet(item: Binding(
-            get: { pickerSource.map { SourceTypeWrapper(source: $0) } },
-            set: { if $0 == nil { pickerSource = nil } }
-        )) { wrapper in
-            ImagePicker(sourceType: wrapper.source) { img in
-                pendingUpload = PendingPhotoUpload(step: activeStep, image: img)
+        .fullScreenCover(isPresented: $showCameraCover, onDismiss: {
+            flushCapturedDraft()
+        }) {
+            ZStack {
+                Color.black.ignoresSafeArea()
+                ImagePicker(sourceType: .camera) { img in
+                    capturedDraftTemp = PendingPhotoUpload(step: activeStep, image: img)
+                }
+                .ignoresSafeArea()
             }
         }
-        .sheet(item: $pendingUpload) { draft in
-            UploadPhotoConfirmSheet(
-                pib: pib,
-                nokon: nokon,
-                ukuran: ukuran,
-                step: draft.step,
-                image: draft.image,
-                existingCount: onlineImages.count,
-                locMgr: locMgr,
-                watermarkEnabled: $watermarkEnabled,
-                pelLorong: pelLorong,
-                alasanLorong: alasanLorong,
-                teknikPeriksa: teknikPeriksa,
-                initialSeriBarang: seriBarang,
-                initialUraianBarang: uraianBarang,
-                initialJumlahKemasan: jumlahJenisKemasan,
-                initialSatuanBarang: satuanBarang,
-                initialNegaraAsal: negaraAsal,
-                initialSpesifikasi: composedSpesifikasi,
-                colors: colors,
-                onOcrContainerDetected: { _ in },
-                onUploaded: {
-                    Task { await onReloadImages() }
+        .sheet(item: $activeSheet, onDismiss: {
+            flushCapturedDraft()
+        }) { sheet in
+            switch sheet {
+            case .gallery:
+                ImagePicker(sourceType: .photoLibrary) { img in
+                    capturedDraftTemp = PendingPhotoUpload(step: activeStep, image: img)
                 }
-            )
-            .environmentObject(app)
-            .preferredColorScheme(app.themeMode.preferredColorScheme)
-        }
-        .sheet(item: $previewItem) { item in
-            FotoFullscreenSheet(
-                item: item,
-                onClose: { previewItem = nil },
-                onRequestDelete: {
-                    let target = item
-                    previewItem = nil
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
-                        onDeleteImage(target)
+            case .confirm(let draft):
+                UploadPhotoConfirmSheet(
+                    pib: pib,
+                    nokon: nokon,
+                    ukuran: ukuran,
+                    step: draft.step,
+                    image: draft.image,
+                    existingCount: onlineImages.count,
+                    locMgr: locMgr,
+                    watermarkEnabled: $watermarkEnabled,
+                    pelLorong: pelLorong,
+                    alasanLorong: alasanLorong,
+                    teknikPeriksa: teknikPeriksa,
+                    initialSeriBarang: seriBarang,
+                    initialUraianBarang: uraianBarang,
+                    initialJumlahKemasan: jumlahJenisKemasan,
+                    initialSatuanBarang: satuanBarang,
+                    initialNegaraAsal: negaraAsal,
+                    initialSpesifikasi: composedSpesifikasi,
+                    colors: colors,
+                    onOcrContainerDetected: { _ in },
+                    onUploaded: {
+                        Task { await onReloadImages() }
                     }
-                }
-            )
+                )
+                .environmentObject(app)
+                .preferredColorScheme(app.themeMode.preferredColorScheme)
+            case .fullscreen(let item):
+                FotoFullscreenSheet(
+                    item: item,
+                    onClose: { activeSheet = nil },
+                    onRequestDelete: {
+                        let target = item
+                        activeSheet = nil
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                            onDeleteImage(target)
+                        }
+                    }
+                )
+            }
+        }
+    }
+
+    private func openCameraDirect() {
+        Task { @MainActor in
+            let granted = await CameraPermissionHelper.ensureCameraAccess()
+            if granted {
+                showCameraCover = true
+            } else {
+                app.showToast("Izin kamera belum aktif — buka Pengaturan > SIAP NEO > Kamera")
+            }
+        }
+    }
+
+    private func openCameraAfterDialog() {
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 280_000_000)
+            let granted = await CameraPermissionHelper.ensureCameraAccess()
+            if granted {
+                showCameraCover = true
+            } else {
+                app.showToast("Izin kamera belum aktif — buka Pengaturan > SIAP NEO > Kamera")
+            }
+        }
+    }
+
+    private func openGalleryAfterDialog() {
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 280_000_000)
+            activeSheet = .gallery
+        }
+    }
+
+    private func flushCapturedDraft() {
+        guard let draft = capturedDraftTemp else { return }
+        capturedDraftTemp = nil
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+            activeSheet = .confirm(draft)
         }
     }
 }
@@ -3372,11 +3490,6 @@ private struct FotoFullscreenSheet: View {
             }
         }
     }
-}
-
-private struct SourceTypeWrapper: Identifiable {
-    let id = UUID()
-    let source: UIImagePickerController.SourceType
 }
 
 // MARK: - Dedicated TTD PJ Modal Sheet (High-Contrast Dark/Light!)
@@ -6066,8 +6179,12 @@ struct RedistSheetView: View {
                     }
                 }
             }
-            .sheet(isPresented: $showCameraPicker) {
-                ImagePicker(sourceType: .camera) { img in pickedImage = img }
+            .fullScreenCover(isPresented: $showCameraPicker) {
+                ZStack {
+                    Color.black.ignoresSafeArea()
+                    ImagePicker(sourceType: .camera) { img in pickedImage = img }
+                        .ignoresSafeArea()
+                }
             }
             .sheet(isPresented: $showGalleryPicker) {
                 ImagePicker(sourceType: .photoLibrary) { img in pickedImage = img }
@@ -6281,7 +6398,13 @@ struct RedistSheetView: View {
 
                     HStack(spacing: 10) {
                         SiapOutlinedButton("Kamera", icon: "camera.fill", color: colors.secondary) {
-                            showCameraPicker = true
+                            Task { @MainActor in
+                                if await CameraPermissionHelper.ensureCameraAccess() {
+                                    showCameraPicker = true
+                                } else {
+                                    app.showToast("Izin kamera belum aktif — buka Pengaturan > SIAP NEO > Kamera")
+                                }
+                            }
                         }
                         SiapOutlinedButton("Galeri", icon: "photo.on.rectangle", color: SiapColors.brandAmber) {
                             showGalleryPicker = true

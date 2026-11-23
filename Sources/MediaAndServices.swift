@@ -2,6 +2,7 @@ import SwiftUI
 import UIKit
 import CoreLocation
 import Vision
+import AVFoundation
 
 final class LocationManager: NSObject, ObservableObject, CLLocationManagerDelegate {
     private let manager = CLLocationManager()
@@ -10,7 +11,8 @@ final class LocationManager: NSObject, ObservableObject, CLLocationManagerDelega
     override init() {
         super.init()
         manager.delegate = self
-        manager.desiredAccuracy = kCLLocationAccuracyBest
+        manager.desiredAccuracy = kCLLocationAccuracyNearestTenMeters
+        manager.distanceFilter = 15
     }
 
     func request() {
@@ -18,17 +20,48 @@ final class LocationManager: NSObject, ObservableObject, CLLocationManagerDelega
         manager.startUpdatingLocation()
     }
 
+    func stop() {
+        manager.stopUpdatingLocation()
+    }
+
     func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
         guard let loc = locations.last else { return }
         let lat = String(format: "%.6f", loc.coordinate.latitude)
         let lon = String(format: "%.6f", loc.coordinate.longitude)
+        let next = "\(lat),\(lon)"
         DispatchQueue.main.async {
-            self.coordinateText = "\(lat),\(lon)"
+            if self.coordinateText != next {
+                self.coordinateText = next
+            }
         }
     }
 
     func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {
         // Keep last known or default
+    }
+}
+
+enum CameraPermissionHelper {
+    @MainActor
+    static func ensureCameraAccess() async -> Bool {
+        guard UIImagePickerController.isSourceTypeAvailable(.camera) else {
+            return false
+        }
+        let status = AVCaptureDevice.authorizationStatus(for: .video)
+        switch status {
+        case .authorized:
+            return true
+        case .notDetermined:
+            return await withCheckedContinuation { cont in
+                AVCaptureDevice.requestAccess(for: .video) { granted in
+                    cont.resume(returning: granted)
+                }
+            }
+        case .denied, .restricted:
+            return false
+        @unknown default:
+            return false
+        }
     }
 }
 
@@ -43,7 +76,15 @@ struct ImagePicker: UIViewControllerRepresentable {
 
     func makeUIViewController(context: Context) -> UIImagePickerController {
         let picker = UIImagePickerController()
-        picker.sourceType = UIImagePickerController.isSourceTypeAvailable(sourceType) ? sourceType : .photoLibrary
+        let resolvedSource: UIImagePickerController.SourceType =
+            UIImagePickerController.isSourceTypeAvailable(sourceType) ? sourceType : .photoLibrary
+        picker.sourceType = resolvedSource
+        picker.mediaTypes = ["public.image"]
+        picker.allowsEditing = false
+        if resolvedSource == .camera {
+            picker.cameraCaptureMode = .photo
+            picker.modalPresentationStyle = .fullScreen
+        }
         picker.delegate = context.coordinator
         return picker
     }
@@ -52,16 +93,39 @@ struct ImagePicker: UIViewControllerRepresentable {
 
     final class Coordinator: NSObject, UINavigationControllerDelegate, UIImagePickerControllerDelegate {
         let parent: ImagePicker
+        private var hasFinished = false
+
         init(_ parent: ImagePicker) { self.parent = parent }
 
+        private static func normalizeMemorySafe(_ raw: UIImage, maxSide: CGFloat = 2048) -> UIImage {
+            let sz = raw.size
+            guard sz.width > 0, sz.height > 0 else { return raw }
+            let longest = max(sz.width, sz.height)
+            let scale = min(maxSide / longest, 1.0)
+            let target = CGSize(width: max(1, floor(sz.width * scale)), height: max(1, floor(sz.height * scale)))
+            return autoreleasepool {
+                let fmt = UIGraphicsImageRendererFormat()
+                fmt.scale = 1.0
+                let renderer = UIGraphicsImageRenderer(size: target, format: fmt)
+                return renderer.image { _ in
+                    raw.draw(in: CGRect(origin: .zero, size: target))
+                }
+            }
+        }
+
         func imagePickerController(_ picker: UIImagePickerController, didFinishPickingMediaWithInfo info: [UIImagePickerController.InfoKey: Any]) {
-            if let img = info[.originalImage] as? UIImage {
+            guard !hasFinished else { return }
+            hasFinished = true
+            let picked = (info[.originalImage] as? UIImage).map { Self.normalizeMemorySafe($0) }
+            if let img = picked {
                 parent.onPicked(img)
             }
             parent.dismiss()
         }
 
         func imagePickerControllerDidCancel(_ picker: UIImagePickerController) {
+            guard !hasFinished else { return }
+            hasFinished = true
             parent.dismiss()
         }
     }

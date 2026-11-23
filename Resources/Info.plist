@@ -17,9 +17,9 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.19.11</string>
+	<string>1.19.12</string>
 	<key>CFBundleVersion</key>
-	<string>151</string>
+	<string>152</string>
 	<key>LSApplicationQueriesSchemes</key>
 	<array>
 		<string>apple-magnifier</string>
@@ -31,6 +31,8 @@
 	<string>SIAP NEO memerlukan akses kamera untuk mengambil foto pemeriksaan fisik dan scan nomor kontainer.</string>
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>SIAP NEO memerlukan akses galeri untuk memilih foto pemeriksaan fisik.</string>
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>SIAP NEO memerlukan izin galeri untuk menyimpan foto pemeriksaan fisik.</string>
 	<key>NSLocationWhenInUseUsageDescription</key>
 	<string>SIAP NEO memerlukan lokasi GPS untuk watermark dan metadata foto pemeriksaan fisik.</string>
 	<key>NSAppTransportSecurity</key>
