@@ -399,7 +399,10 @@ final class SiapApiClient {
         jumlahJenisKemasan: String,
         pelLorong: String = "0",
         alasanLorong: String = "-",
-        teknikPeriksa: String = "-"
+        teknikPeriksa: String = "-",
+        satuanBarang: String = "",
+        negaraAsal: String = "",
+        spesifikasi: String = ""
     ) async throws -> String {
         if isLcl {
             let (_, _, raw) = try await postForm(endpoint: "insert_image_lcl", fields: [
@@ -415,9 +418,9 @@ final class SiapApiClient {
                 ("status_online", "1"),
                 ("jumlah_jenis_kemasan", jumlahJenisKemasan),
                 ("uraian_barang", uraianBarang),
-                ("satuan_barang", ""),
-                ("negara_asal", ""),
-                ("spesifikasi", "")
+                ("satuan_barang", satuanBarang),
+                ("negara_asal", negaraAsal),
+                ("spesifikasi", spesifikasi)
             ])
             return raw
         } else {
@@ -438,11 +441,22 @@ final class SiapApiClient {
                 ("teknik_periksa", teknikPeriksa),
                 ("jumlah_jenis_kemasan", jumlahJenisKemasan),
                 ("uraian_barang", uraianBarang),
-                ("satuan_barang", ""),
-                ("negara_asal", ""),
-                ("spesifikasi", "")
+                ("satuan_barang", satuanBarang),
+                ("negara_asal", negaraAsal),
+                ("spesifikasi", spesifikasi)
             ])
             return raw
+        }
+    }
+
+    func fetchNegaraAsal() async -> [String] {
+        guard let (_, data, _) = try? await postForm(endpoint: "get_negara_asal", fields: []),
+              let arr = (try? JSONSerialization.jsonObject(with: data)) as? [[String: Any]] else {
+            return []
+        }
+        return arr.compactMap { dict in
+            let v = cleanField(dict, "nama_negara_asal", fallback: "")
+            return v.isEmpty ? nil : v
         }
     }
 

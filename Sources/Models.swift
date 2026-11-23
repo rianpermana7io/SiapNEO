@@ -280,14 +280,13 @@ struct StepOption: Identifiable, Hashable {
         StepOption(code: "9", label: "Foto Barang Contoh")
     ]
 
-    /// Ordered categories displayed inside the "Foto Kontainer" card (matches screenshot order)
+    /// Ordered categories displayed inside the "Foto Kontainer" card (strictly container photos only)
     static let containerPhotoSteps: [StepOption] = [
         StepOption(code: "2", label: "Foto Segel"),
         StepOption(code: "3", label: "Foto Kontainer Tertutup"),
         StepOption(code: "4", label: "Foto Kontainer Buka Setengah"),
         StepOption(code: "5", label: "Foto Kontainer Buka Seluruh"),
-        StepOption(code: "7", label: "Foto Lorong"),
-        StepOption(code: "1", label: "ID Card PJ")
+        StepOption(code: "7", label: "Foto Lorong")
     ]
 
     /// Ordered categories displayed inside the "Tambah Barang" sheet

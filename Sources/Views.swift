@@ -2016,9 +2016,11 @@ struct UploadFotoPanel: View {
     }
 
     private var unmatchedContainerImages: [OnlineImageItem] {
-        onlineImages.filter { item in
+        let idCardStep = StepOption(code: "1", label: "ID Card PJ")
+        return onlineImages.filter { item in
             !StepOption.containerPhotoSteps.contains(where: { $0.matches(item.ketPraPemeriksaan) })
             && !StepOption.barangPhotoSteps.contains(where: { $0.matches(item.ketPraPemeriksaan) })
+            && !idCardStep.matches(item.ketPraPemeriksaan)
         }
     }
 
@@ -2694,7 +2696,7 @@ private struct SiapRadioRow: View {
     }
 }
 
-// MARK: - Foto Barang Dedicated Sheet ("Tambah Barang >")
+// MARK: - Foto Barang & Detail Barang Sheet ("Tambah Barang >" — Format CEISA 4.0)
 
 private struct FotoBarangSheet: View {
     @EnvironmentObject var app: AppState
@@ -2718,43 +2720,374 @@ private struct FotoBarangSheet: View {
     @State private var pendingUpload: PendingPhotoUpload?
     @State private var previewItem: OnlineImageItem?
 
+    // CEISA 4.0 #detail__Barang form fields
+    @State private var seriBarang = "1"
+    @State private var uraianBarang = ""
+    @State private var jumlahJenisKemasan = ""
+    @State private var satuanBarang = "PCE"
+    @State private var negaraAsal = ""
+    @State private var negaraOptions: [String] = []
+    @State private var kondisiBaru = true
+    @State private var merk = ""
+    @State private var model = ""
+    @State private var tipe = ""
+
+    private let quickUnits = ["PCE", "SET", "UNT", "KGM", "CTN", "PK"]
+
+    private var sectionHeaderColor: Color {
+        colors.isDark ? SiapColors.brandSky : Color(hex: 0x163A63)
+    }
+
+    private var navyActionColor: Color {
+        colors.isDark ? Color(hex: 0x1E4B8A) : Color(hex: 0x0A2D63)
+    }
+
+    private var composedSpesifikasi: String {
+        var parts: [String] = []
+        let m = merk.trimmingCharacters(in: .whitespacesAndNewlines)
+        let md = model.trimmingCharacters(in: .whitespacesAndNewlines)
+        let tp = tipe.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !m.isEmpty { parts.append("Merek: \(m)") }
+        if !md.isEmpty { parts.append("Model: \(md)") }
+        if !tp.isEmpty { parts.append("Tipe: \(tp)") }
+        parts.append("Kondisi: \(kondisiBaru ? "BARU" : "BUKAN BARU")")
+        return parts.joined(separator: " | ")
+    }
+
     var body: some View {
         NavigationStack {
             ScrollView {
-                VStack(alignment: .leading, spacing: 16) {
-                    VStack(alignment: .leading, spacing: 16) {
-                        ForEach(StepOption.barangPhotoSteps) { step in
-                            let stepPhotos = onlineImages.filter { step.matches($0.ketPraPemeriksaan) }
-                            FotoCategoryStripRow(
-                                title: step.sectionTitle,
-                                photos: stepPhotos,
-                                colors: colors,
-                                onTapAdd: {
-                                    activeStep = step
-                                    showSourceDialog = true
-                                },
-                                onTapPhoto: { item in
-                                    previewItem = item
-                                },
-                                onDeletePhoto: { item in
-                                    onDeleteImage(item)
-                                }
-                            )
+                VStack(alignment: .leading, spacing: 14) {
+                    // SECTION 1: Foto Barang (CEISA 4.0 dashed '+' card layout)
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Foto Barang")
+                            .font(.system(size: 13.5, weight: .semibold))
+                            .foregroundStyle(sectionHeaderColor)
+                            .padding(.horizontal, 16)
+
+                        VStack(alignment: .leading, spacing: 16) {
+                            ForEach(StepOption.barangPhotoSteps) { step in
+                                let stepPhotos = onlineImages.filter { step.matches($0.ketPraPemeriksaan) }
+                                FotoCategoryStripRow(
+                                    title: step.sectionTitle,
+                                    photos: stepPhotos,
+                                    colors: colors,
+                                    onTapAdd: {
+                                        activeStep = step
+                                        showSourceDialog = true
+                                    },
+                                    onTapPhoto: { item in
+                                        previewItem = item
+                                    },
+                                    onDeletePhoto: { item in
+                                        onDeleteImage(item)
+                                    }
+                                )
+                            }
                         }
+                        .padding(14)
+                        .background(colors.surface)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                .stroke(colors.isDark ? colors.cardBorder : Color.black.opacity(0.05), lineWidth: 1)
+                        )
+                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                        .shadow(color: Color.black.opacity(colors.isDark ? 0.25 : 0.08), radius: 8, x: 0, y: 3)
+                        .padding(.horizontal, 14)
                     }
-                    .padding(14)
-                    .background(colors.surface)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 12, style: .continuous)
-                            .stroke(colors.isDark ? colors.cardBorder : Color.black.opacity(0.05), lineWidth: 1)
-                    )
-                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                    .shadow(color: Color.black.opacity(colors.isDark ? 0.25 : 0.08), radius: 8, x: 0, y: 3)
-                    .padding(14)
+                    .padding(.top, 10)
+
+                    // SECTION 2: Detail Barang (Format CEISA 4.0)
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Detail Barang (Format CEISA 4.0)")
+                            .font(.system(size: 13.5, weight: .semibold))
+                            .foregroundStyle(sectionHeaderColor)
+                            .padding(.horizontal, 16)
+
+                        VStack(alignment: .leading, spacing: 12) {
+                            // Seri Barang
+                            HStack(spacing: 10) {
+                                Text("Seri Barang")
+                                    .font(.system(size: 13, weight: .semibold))
+                                    .foregroundStyle(colors.textHint)
+                                Spacer()
+                                HStack(spacing: 6) {
+                                    Button {
+                                        let cur = Int(seriBarang) ?? 1
+                                        seriBarang = "\(max(1, cur - 1))"
+                                    } label: {
+                                        Image(systemName: "minus")
+                                            .font(.system(size: 12, weight: .bold))
+                                            .frame(width: 30, height: 30)
+                                            .background(colors.surfaceElevated)
+                                            .foregroundStyle(colors.textPrimary)
+                                            .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                                    }
+                                    .buttonStyle(.plain)
+
+                                    TextField("1", text: $seriBarang)
+                                        .keyboardType(.numberPad)
+                                        .multilineTextAlignment(.center)
+                                        .font(.system(size: 14, weight: .bold, design: .monospaced))
+                                        .foregroundStyle(colors.textPrimary)
+                                        .frame(width: 52, height: 30)
+                                        .background(colors.surfaceElevated)
+                                        .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+
+                                    Button {
+                                        let cur = Int(seriBarang) ?? 0
+                                        seriBarang = "\(cur + 1)"
+                                    } label: {
+                                        Image(systemName: "plus")
+                                            .font(.system(size: 12, weight: .bold))
+                                            .frame(width: 30, height: 30)
+                                            .background(colors.surfaceElevated)
+                                            .foregroundStyle(colors.textPrimary)
+                                            .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                                    }
+                                    .buttonStyle(.plain)
+                                }
+                            }
+
+                            // Uraian Barang (multiline seperti textarea CEISA 4.0)
+                            VStack(alignment: .leading, spacing: 5) {
+                                Text("Uraian Barang")
+                                    .font(.system(size: 12.5, weight: .semibold))
+                                    .foregroundStyle(colors.textHint)
+                                ZStack(alignment: .topLeading) {
+                                    if uraianBarang.isEmpty {
+                                        Text("Contoh: Barang berbentuk ..., berbahan menyerupai ..., berwarna ...")
+                                            .font(.system(size: 13))
+                                            .foregroundStyle(colors.textHint.opacity(0.7))
+                                            .padding(.horizontal, 10)
+                                            .padding(.vertical, 10)
+                                    }
+                                    TextEditor(text: $uraianBarang)
+                                        .font(.system(size: 13.5))
+                                        .foregroundStyle(colors.textPrimary)
+                                        .frame(minHeight: 74)
+                                        .scrollContentBackground(.hidden)
+                                        .padding(6)
+                                }
+                                .background(colors.surfaceElevated)
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 9, style: .continuous)
+                                        .stroke(colors.cardBorder, lineWidth: 1)
+                                )
+                                .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+                            }
+
+                            // Jumlah & Jenis Kemasan
+                            VStack(alignment: .leading, spacing: 5) {
+                                Text("Jumlah & Jenis Kemasan")
+                                    .font(.system(size: 12.5, weight: .semibold))
+                                    .foregroundStyle(colors.textHint)
+                                TextField("Contoh: 10 CT - Carton / 5 PK - Package", text: $jumlahJenisKemasan)
+                                    .font(.system(size: 13.5))
+                                    .foregroundStyle(colors.textPrimary)
+                                    .padding(10)
+                                    .background(colors.surfaceElevated)
+                                    .overlay(
+                                        RoundedRectangle(cornerRadius: 9, style: .continuous)
+                                            .stroke(colors.cardBorder, lineWidth: 1)
+                                    )
+                                    .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+                            }
+
+                            // Satuan Barang
+                            VStack(alignment: .leading, spacing: 6) {
+                                Text("Satuan Barang")
+                                    .font(.system(size: 12.5, weight: .semibold))
+                                    .foregroundStyle(colors.textHint)
+                                ScrollView(.horizontal, showsIndicators: false) {
+                                    HStack(spacing: 6) {
+                                        ForEach(quickUnits, id: \.self) { u in
+                                            let active = satuanBarang.uppercased() == u
+                                            Button { satuanBarang = u } label: {
+                                                Text(u)
+                                                    .font(.system(size: 11.5, weight: .bold))
+                                                    .padding(.horizontal, 10)
+                                                    .padding(.vertical, 5)
+                                                    .background(active ? navyActionColor : colors.surfaceElevated)
+                                                    .foregroundStyle(active ? .white : colors.textSecondary)
+                                                    .clipShape(Capsule())
+                                            }
+                                            .buttonStyle(.plain)
+                                        }
+                                    }
+                                }
+                                TextField("Kode satuan (PCE / SET / KGM / UNT)", text: $satuanBarang)
+                                    .textInputAutocapitalization(.characters)
+                                    .font(.system(size: 13.5))
+                                    .foregroundStyle(colors.textPrimary)
+                                    .padding(10)
+                                    .background(colors.surfaceElevated)
+                                    .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+                            }
+
+                            Divider().overlay(colors.divider)
+
+                            // Unsur Barang: Asal Negara & Kondisi Barang (CEISA 4.0)
+                            Text("Unsur Barang")
+                                .font(.system(size: 13, weight: .bold))
+                                .foregroundStyle(colors.textPrimary)
+
+                            VStack(alignment: .leading, spacing: 5) {
+                                Text("Asal Negara")
+                                    .font(.system(size: 12.5, weight: .semibold))
+                                    .foregroundStyle(colors.textHint)
+                                if !negaraOptions.isEmpty {
+                                    Menu {
+                                        Button("Sesuai Dokumen (Kosong)") { negaraAsal = "" }
+                                        ForEach(negaraOptions.prefix(80), id: \.self) { neg in
+                                            Button(neg) { negaraAsal = neg }
+                                        }
+                                    } label: {
+                                        HStack {
+                                            Text(negaraAsal.isEmpty ? "Sesuai Dokumen / Pilih Negara Asal..." : negaraAsal)
+                                                .font(.system(size: 13.5))
+                                                .foregroundStyle(negaraAsal.isEmpty ? colors.textHint : colors.textPrimary)
+                                                .lineLimit(1)
+                                            Spacer()
+                                            Image(systemName: "chevron.down")
+                                                .font(.system(size: 11, weight: .bold))
+                                                .foregroundStyle(colors.textHint)
+                                        }
+                                        .padding(10)
+                                        .background(colors.surfaceElevated)
+                                        .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+                                    }
+                                } else {
+                                    TextField("Contoh: CHINA (kosongkan bila tidak tertera Made in)", text: $negaraAsal)
+                                        .textInputAutocapitalization(.characters)
+                                        .font(.system(size: 13.5))
+                                        .foregroundStyle(colors.textPrimary)
+                                        .padding(10)
+                                        .background(colors.surfaceElevated)
+                                        .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+                                }
+                            }
+
+                            VStack(alignment: .leading, spacing: 8) {
+                                Text("Kondisi Barang")
+                                    .font(.system(size: 12.5, weight: .semibold))
+                                    .foregroundStyle(colors.textHint)
+                                HStack(spacing: 16) {
+                                    SiapRadioRow(label: "1 - BARU", selected: kondisiBaru, colors: colors) {
+                                        kondisiBaru = true
+                                    }
+                                    SiapRadioRow(label: "2 - BUKAN BARU", selected: !kondisiBaru, colors: colors) {
+                                        kondisiBaru = false
+                                    }
+                                }
+                            }
+
+                            Divider().overlay(colors.divider)
+
+                            // Tabel Spesifikasi (Merek / Model / Tipe — Format CEISA 4.0)
+                            Text("Spesifikasi (Merek / Model / Tipe)")
+                                .font(.system(size: 13, weight: .bold))
+                                .foregroundStyle(colors.textPrimary)
+
+                            HStack(spacing: 8) {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text("Merek").font(.system(size: 11.5)).foregroundStyle(colors.textHint)
+                                    TextField("-", text: $merk)
+                                        .font(.system(size: 13))
+                                        .padding(9)
+                                        .background(colors.surfaceElevated)
+                                        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                                }
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text("Model").font(.system(size: 11.5)).foregroundStyle(colors.textHint)
+                                    TextField("-", text: $model)
+                                        .font(.system(size: 13))
+                                        .padding(9)
+                                        .background(colors.surfaceElevated)
+                                        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                                }
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text("Tipe").font(.system(size: 11.5)).foregroundStyle(colors.textHint)
+                                    TextField("-", text: $tipe)
+                                        .font(.system(size: 13))
+                                        .padding(9)
+                                        .background(colors.surfaceElevated)
+                                        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                                }
+                            }
+
+                            // Watermark toggle
+                            HStack {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("Watermark GPS + WIB")
+                                        .font(.system(size: 13, weight: .semibold))
+                                        .foregroundStyle(colors.textPrimary)
+                                    Text("GPS: \(locMgr.coordinateText)")
+                                        .font(.system(size: 11, design: .monospaced))
+                                        .foregroundStyle(colors.secondary)
+                                }
+                                Spacer()
+                                Toggle("", isOn: $watermarkEnabled)
+                                    .labelsHidden()
+                                    .tint(navyActionColor)
+                            }
+                            .padding(.top, 2)
+
+                            // Quick Capture Buttons (directly attaches all CEISA 4.0 fields!)
+                            Button {
+                                activeStep = StepOption.barangPhotoSteps[0]
+                                pickerSource = UIImagePickerController.isSourceTypeAvailable(.camera) ? .camera : .photoLibrary
+                            } label: {
+                                HStack(spacing: 8) {
+                                    Image(systemName: "camera.fill")
+                                    Text("AMBIL FOTO BARANG (KAMERA)")
+                                        .font(.system(size: 13.5, weight: .bold))
+                                        .tracking(0.3)
+                                }
+                                .foregroundStyle(.white)
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 13.5)
+                                .background(navyActionColor)
+                                .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                            }
+                            .buttonStyle(.plain)
+
+                            Button {
+                                activeStep = StepOption.barangPhotoSteps[0]
+                                pickerSource = .photoLibrary
+                            } label: {
+                                HStack(spacing: 8) {
+                                    Image(systemName: "photo.on.rectangle.angled")
+                                    Text("PILIH FOTO BARANG DARI GALERI")
+                                        .font(.system(size: 13, weight: .bold))
+                                }
+                                .foregroundStyle(navyActionColor)
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 12)
+                                .background(colors.surfaceElevated)
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                        .stroke(navyActionColor.opacity(0.4), lineWidth: 1)
+                                )
+                                .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                            }
+                            .buttonStyle(.plain)
+                        }
+                        .padding(14)
+                        .background(colors.surface)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                .stroke(colors.isDark ? colors.cardBorder : Color.black.opacity(0.05), lineWidth: 1)
+                        )
+                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                        .shadow(color: Color.black.opacity(colors.isDark ? 0.25 : 0.08), radius: 8, x: 0, y: 3)
+                        .padding(.horizontal, 14)
+                    }
                 }
+                .padding(.bottom, 24)
             }
             .background(colors.backdrop.ignoresSafeArea())
-            .navigationTitle("Foto Barang : \(nokon)")
+            .navigationTitle("Tambah Barang : \(nokon)")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .navigationBarTrailing) {
@@ -2762,6 +3095,10 @@ private struct FotoBarangSheet: View {
                         .font(.system(size: 14, weight: .bold))
                 }
             }
+        }
+        .task {
+            let list = await SiapApiClient.shared.fetchNegaraAsal()
+            if !list.isEmpty { negaraOptions = list }
         }
         .confirmationDialog("Tambah \(activeStep.label)", isPresented: $showSourceDialog, titleVisibility: .visible) {
             if UIImagePickerController.isSourceTypeAvailable(.camera) {
@@ -2791,6 +3128,12 @@ private struct FotoBarangSheet: View {
                 pelLorong: pelLorong,
                 alasanLorong: alasanLorong,
                 teknikPeriksa: teknikPeriksa,
+                initialSeriBarang: seriBarang,
+                initialUraianBarang: uraianBarang,
+                initialJumlahKemasan: jumlahJenisKemasan,
+                initialSatuanBarang: satuanBarang,
+                initialNegaraAsal: negaraAsal,
+                initialSpesifikasi: composedSpesifikasi,
                 colors: colors,
                 onOcrContainerDetected: { _ in },
                 onUploaded: {
@@ -2832,6 +3175,12 @@ private struct UploadPhotoConfirmSheet: View {
     let pelLorong: String
     let alasanLorong: String
     let teknikPeriksa: String
+    var initialSeriBarang: String = ""
+    var initialUraianBarang: String = ""
+    var initialJumlahKemasan: String = ""
+    var initialSatuanBarang: String = ""
+    var initialNegaraAsal: String = ""
+    var initialSpesifikasi: String = ""
     let colors: SiapColors
     let onOcrContainerDetected: (String) -> Void
     let onUploaded: () -> Void
@@ -2839,6 +3188,9 @@ private struct UploadPhotoConfirmSheet: View {
     @State private var seriBarang = ""
     @State private var deskripsi = ""
     @State private var jumlahKemasan = ""
+    @State private var satuanBarang = ""
+    @State private var negaraAsal = ""
+    @State private var spesifikasi = ""
     @State private var isUploading = false
     @State private var isOcrRunning = false
 
@@ -2887,21 +3239,42 @@ private struct UploadPhotoConfirmSheet: View {
                         }
 
                         if step.isBarangStep {
-                            TextField("Seri barang (contoh: 1, 2, dst.)", text: $seriBarang)
-                                .keyboardType(.numberPad)
-                                .font(.system(size: 13.5))
-                                .padding(11)
-                                .background(colors.surfaceElevated)
-                                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                            HStack(spacing: 8) {
+                                TextField("Seri barang", text: $seriBarang)
+                                    .keyboardType(.numberPad)
+                                    .font(.system(size: 13.5))
+                                    .padding(10)
+                                    .background(colors.surfaceElevated)
+                                    .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+                                TextField("Satuan (PCE/SET)", text: $satuanBarang)
+                                    .textInputAutocapitalization(.characters)
+                                    .font(.system(size: 13.5))
+                                    .padding(10)
+                                    .background(colors.surfaceElevated)
+                                    .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+                            }
 
                             TextField("Jumlah & jenis kemasan (opsional)", text: $jumlahKemasan)
                                 .font(.system(size: 13.5))
-                                .padding(11)
+                                .padding(10)
                                 .background(colors.surfaceElevated)
-                                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                                .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+
+                            TextField("Asal negara (opsional)", text: $negaraAsal)
+                                .textInputAutocapitalization(.characters)
+                                .font(.system(size: 13.5))
+                                .padding(10)
+                                .background(colors.surfaceElevated)
+                                .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+
+                            TextField("Spesifikasi (Merek / Model / Tipe / Kondisi)", text: $spesifikasi)
+                                .font(.system(size: 13))
+                                .padding(10)
+                                .background(colors.surfaceElevated)
+                                .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
                         }
 
-                        TextField(step.isBarangStep ? "Uraian / keterangan barang (opsional)" : "Keterangan foto (opsional)", text: $deskripsi)
+                        TextField(step.isBarangStep ? "Uraian barang (format CEISA 4.0)" : "Keterangan foto (opsional)", text: $deskripsi)
                             .font(.system(size: 13.5))
                             .foregroundStyle(colors.textPrimary)
                             .padding(11)
@@ -2948,6 +3321,14 @@ private struct UploadPhotoConfirmSheet: View {
                 ToolbarItem(placement: .navigationBarLeading) {
                     Button("Batal") { dismiss() }
                 }
+            }
+            .onAppear {
+                if seriBarang.isEmpty { seriBarang = initialSeriBarang }
+                if deskripsi.isEmpty { deskripsi = initialUraianBarang }
+                if jumlahKemasan.isEmpty { jumlahKemasan = initialJumlahKemasan }
+                if satuanBarang.isEmpty { satuanBarang = initialSatuanBarang }
+                if negaraAsal.isEmpty { negaraAsal = initialNegaraAsal }
+                if spesifikasi.isEmpty { spesifikasi = initialSpesifikasi }
             }
         }
     }
@@ -3007,7 +3388,10 @@ private struct UploadPhotoConfirmSheet: View {
                 jumlahJenisKemasan: jumlahKemasan,
                 pelLorong: pelLorong,
                 alasanLorong: alasanLorong,
-                teknikPeriksa: teknikPeriksa
+                teknikPeriksa: teknikPeriksa,
+                satuanBarang: satuanBarang,
+                negaraAsal: negaraAsal,
+                spesifikasi: spesifikasi
             )
             app.showToast("Foto \(step.sectionTitle) berhasil diunggah!")
             onUploaded()
