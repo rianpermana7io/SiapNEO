@@ -256,45 +256,62 @@ final class SiapApiClient {
             let (_, data, _) = try await postForm(endpoint: "homescreen", fields: [("nipppf", cleanNip)])
             let list = parsePibArray(data)
             if !list.isEmpty {
-                return list
+                return await enrichMissingPibDetails(list, nip: cleanNip)
             }
         }
 
-        // Fallback to detailkontainer_nip (matches SIAP NEO getHomescreenPibFromDetail)
+        // Exact port of Android SiapApiClient$getHomescreenPibFromDetail$2:
+        // 1) Fetch detailkontainer_nip
+        // 2) Exclude completed rows (BAP / SELESAI PERIKSA) so empty completed stubs never flood Beranda
+        // 3) Enrich each remaining unique active PIB via browse_data(nip, noPib) for full Importir/TPS/PFPD/PJ
         let lorong = try await fetchDetailKontainerNip(nip: cleanNip)
-        var seen = Set<String>()
-        var out: [PibDocument] = []
+        var seenPibs = Set<String>()
+        var activeNoPibs: [String] = []
         for row in lorong {
-            if row.kodeTiket.isEmpty || seen.contains(row.kodeTiket) { continue }
-            seen.insert(row.kodeTiket)
-            out.append(PibDocument(
-                kodeTiket: row.kodeTiket,
-                noPib: row.noPib,
-                tglPib: row.tglPib,
-                jenisDokumen: "PIB",
-                importir: "-",
-                kodeTps: "-",
-                jenisKontainer: row.noContainer.isEmpty ? "LCL" : "FCL",
-                ipCeisa: "-",
-                namaPfpd: "-",
-                noHpPfpd: "",
-                atensi: "",
-                namaPj: "-",
-                hpPj: "",
-                nomorBap: "",
-                tglBap: "-",
-                persentasePeriksa: "-",
-                status: row.status,
-                jumlahItem: "-",
-                barcon: "-",
-                pendampingan: "-",
-                bidangPendamping: "-",
-                namaPendamping: "-",
-                kendala: "-",
-                cluster: "-"
-            ))
+            let stUpper = row.status.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+            if stUpper == "BAP" || stUpper == "SELESAI PERIKSA" || stUpper.contains("BAP") || stUpper.contains("SELESAI") {
+                continue
+            }
+            let pibNum = row.noPib.trimmingCharacters(in: .whitespacesAndNewlines)
+            if pibNum.isEmpty || pibNum == "-" || seenPibs.contains(pibNum) { continue }
+            seenPibs.insert(pibNum)
+            activeNoPibs.append(pibNum)
+            if activeNoPibs.count >= 16 { break }
         }
-        return out
+
+        if activeNoPibs.isEmpty {
+            return []
+        }
+
+        var enriched: [PibDocument] = []
+        await withTaskGroup(of: PibDocument?.self) { group in
+            for noPib in activeNoPibs {
+                group.addTask {
+                    let found = (try? await self.browsePibData(nip: cleanNip, noPib: noPib)) ?? []
+                    return found.first
+                }
+            }
+            for await item in group {
+                if let doc = item {
+                    enriched.append(doc)
+                }
+            }
+        }
+        return enriched
+    }
+
+    private func enrichMissingPibDetails(_ docs: [PibDocument], nip: String) async -> [PibDocument] {
+        var result = docs
+        for idx in result.indices {
+            let d = result[idx]
+            let needsEnrich = (d.importir == "-" || d.importir.isEmpty) || (d.kodeTps == "-" || d.kodeTps.isEmpty)
+            if needsEnrich, !d.noPib.isEmpty, d.noPib != "-" {
+                if let browsed = try? await browsePibData(nip: nip, noPib: d.noPib), let full = browsed.first {
+                    result[idx] = full
+                }
+            }
+        }
+        return result
     }
 
     func fetchDetailKontainerNip(nip: String) async throws -> [InstruksiLorongItem] {

@@ -609,121 +609,62 @@ struct HomeDashboardView: View {
     @EnvironmentObject var app: AppState
     let colors: SiapColors
 
-    @State private var searchText = ""
-    @State private var filter: HomeStatusFilter = .semua
     @State private var batalTarget: PibDocument?
 
-    private var siapCount: Int { app.pibs.filter { $0.normalizedStatusCategory == "siap" }.count }
-    private var sedangCount: Int { app.pibs.filter { $0.normalizedStatusCategory == "sedang" }.count }
-    private var selesaiCount: Int { app.pibs.filter { $0.normalizedStatusCategory == "selesai" }.count }
-
-    private var filteredPibs: [PibDocument] {
-        let q = searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        return app.pibs.filter { doc in
-            let matchFilter: Bool
-            switch filter {
-            case .semua: matchFilter = true
-            case .siap: matchFilter = doc.normalizedStatusCategory == "siap"
-            case .sedang: matchFilter = doc.normalizedStatusCategory == "sedang"
-            case .selesai: matchFilter = doc.normalizedStatusCategory == "selesai"
-            case .atensi: matchFilter = doc.hasAtensi
-            }
-            if !matchFilter { return false }
-            if q.isEmpty { return true }
-            return doc.noPib.lowercased().contains(q)
-                || doc.importir.lowercased().contains(q)
-                || doc.kodeTps.lowercased().contains(q)
-                || doc.kodeTiket.lowercased().contains(q)
-                || doc.namaPfpd.lowercased().contains(q)
-                || doc.namaPj.lowercased().contains(q)
-        }
-    }
+    private let gridColumns = [
+        GridItem(.flexible(), spacing: 8),
+        GridItem(.flexible(), spacing: 8)
+    ]
 
     var body: some View {
         ScrollView {
-            LazyVStack(spacing: app.isCompact ? 9 : 12) {
-                // Officer Summary Strip (Matches Android SiapCardBrush)
-                VStack(alignment: .leading, spacing: 10) {
-                    HStack(spacing: 10) {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(app.session?.displayName ?? "Pemeriksa")
-                                .font(.system(size: 15.5, weight: .bold))
-                                .foregroundStyle(.white)
-                                .lineLimit(1)
-                            HStack(spacing: 6) {
-                                Text("NIP \(app.session?.nip ?? "-")")
-                                    .font(.system(size: 11.5, design: .monospaced))
-                                    .foregroundStyle(SiapColors.hintOnNavy)
-                                if let jab = app.session?.jabatan, !jab.isEmpty {
-                                    Text("• \(jab)")
-                                        .font(.system(size: 11))
-                                        .foregroundStyle(SiapColors.brandAmber)
-                                        .lineLimit(1)
-                                }
-                            }
-                        }
-                        Spacer()
-                    }
-
-                    HStack(spacing: 8) {
-                        HomeMetricBox(label: "Total", value: "\(app.pibs.count)", accent: .white)
-                        HomeMetricBox(label: "Siap", value: "\(siapCount)", accent: Color(hex: 0xFCA5A5))
-                        HomeMetricBox(label: "Sedang", value: "\(sedangCount)", accent: Color(hex: 0x86EFAC))
-                        HomeMetricBox(label: "Selesai", value: "\(selesaiCount)", accent: Color(hex: 0x7DD3FC))
-                    }
-                }
-                .padding(14)
-                .background(colors.cardGradient)
-                .overlay(
-                    RoundedRectangle(cornerRadius: 16, style: .continuous)
-                        .stroke(Color.white.opacity(0.1), lineWidth: 1)
-                )
-                .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-                .padding(.horizontal, 12)
-                .padding(.top, 10)
-
-                // Daftar PIB Header Row (Matches Android HomeDashboardContent)
+            VStack(alignment: .leading, spacing: 12) {
+                // Row 1: Exact Android Daftar PIB [N] | Diperbarui HH.mm + Refresh
                 HStack(spacing: 8) {
                     Text("Daftar PIB")
-                        .font(.system(size: 15.5, weight: .bold))
+                        .font(.system(size: 16.5, weight: .bold))
                         .foregroundStyle(colors.textPrimary)
 
-                    Text("\(filteredPibs.count)")
-                        .font(.system(size: 12, weight: .heavy, design: .rounded))
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 3)
-                        .background(colors.primaryAction)
-                        .foregroundStyle(colors.onPrimaryAction)
-                        .clipShape(Capsule())
-
-                    if !app.lastUpdatedText.isEmpty {
-                        Text(app.lastUpdatedText)
-                            .font(.system(size: 11))
-                            .foregroundStyle(colors.textHint)
-                            .lineLimit(1)
-                    }
+                    Text("\(app.pibs.count)")
+                        .font(.system(size: 13, weight: .heavy, design: .rounded))
+                        .frame(minWidth: 24, minHeight: 24)
+                        .padding(.horizontal, 5)
+                        .background(SiapColors.brandAmber)
+                        .foregroundStyle(Color(hex: 0x0B131D))
+                        .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
 
                     Spacer()
 
+                    if !app.lastUpdatedText.isEmpty {
+                        Text(app.lastUpdatedText)
+                            .font(.system(size: 12.5, weight: .medium))
+                            .foregroundStyle(colors.textSecondary)
+                            .lineLimit(1)
+                    }
+
                     Button {
-                        app.showManualSheet = true
+                        Task { await app.loadPibs() }
                     } label: {
-                        HStack(spacing: 4) {
-                            Image(systemName: "plus.circle.fill")
-                            Text("Manual")
+                        Group {
+                            if app.isLoadingPibs {
+                                ProgressView()
+                                    .tint(SiapColors.brandAmber)
+                                    .scaleEffect(0.8)
+                            } else {
+                                Image(systemName: "arrow.clockwise")
+                                    .font(.system(size: 17, weight: .bold))
+                                    .foregroundStyle(SiapColors.brandAmber)
+                            }
                         }
-                        .font(.system(size: 12, weight: .bold))
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 6)
-                        .background(colors.primaryContainer)
-                        .foregroundStyle(colors.onPrimaryContainer)
-                        .clipShape(Capsule())
+                        .frame(width: 28, height: 28)
                     }
                     .buttonStyle(.plain)
+                    .disabled(app.isLoadingPibs)
                 }
                 .padding(.horizontal, 14)
+                .padding(.top, 12)
 
-                // Authentic Android Redist & Hold Quick Action Row
+                // Row 2: Exact Android Redist & Hold Quick Action Row
                 HStack(spacing: 10) {
                     Button {
                         app.showRedistSheet = true
@@ -736,7 +677,7 @@ struct HomeDashboardView: View {
                         }
                         .foregroundStyle(SiapColors.brandAmber)
                         .frame(maxWidth: .infinity)
-                        .padding(.vertical, 11)
+                        .padding(.vertical, 12)
                         .background(colors.isDark ? Color(hex: 0x132231) : colors.surface)
                         .overlay(
                             RoundedRectangle(cornerRadius: 12, style: .continuous)
@@ -757,7 +698,7 @@ struct HomeDashboardView: View {
                         }
                         .foregroundStyle(SiapColors.brandSky)
                         .frame(maxWidth: .infinity)
-                        .padding(.vertical, 11)
+                        .padding(.vertical, 12)
                         .background(colors.isDark ? Color(hex: 0x132231) : colors.surface)
                         .overlay(
                             RoundedRectangle(cornerRadius: 12, style: .continuous)
@@ -769,120 +710,70 @@ struct HomeDashboardView: View {
                 }
                 .padding(.horizontal, 12)
 
-                // Search Bar
-                HStack(spacing: 8) {
-                    Image(systemName: "magnifyingglass")
-                        .foregroundStyle(colors.textHint)
-                    TextField("Cari No PIB, Importir, TPS, PFPD, PJ...", text: $searchText)
-                        .font(.system(size: 13.5))
-                        .foregroundStyle(colors.textPrimary)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                    if !searchText.isEmpty {
-                        Button { searchText = "" } label: {
-                            Image(systemName: "xmark.circle.fill")
-                                .foregroundStyle(colors.textHint)
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 10)
-                .background(colors.surface)
-                .overlay(
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .stroke(colors.cardBorder, lineWidth: 1)
-                )
-                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                .padding(.horizontal, 12)
-
-                // Status Filter Chips
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 7) {
-                        ForEach(HomeStatusFilter.allCases) { item in
-                            let active = filter == item
-                            Button { filter = item } label: {
-                                Text(filterChipTitle(item))
-                                    .font(.system(size: 12, weight: .bold))
-                                    .padding(.horizontal, 12)
-                                    .padding(.vertical, 7)
-                                    .background(active ? colors.primaryAction : colors.surface)
-                                    .foregroundStyle(active ? colors.onPrimaryAction : colors.textSecondary)
-                                    .overlay(
-                                        Capsule().stroke(active ? Color.clear : colors.cardBorder, lineWidth: 1)
-                                    )
-                                    .clipShape(Capsule())
-                            }
-                            .buttonStyle(.plain)
-                        }
-                    }
-                    .padding(.horizontal, 12)
-                }
-
-                // Content List
+                // Row 3: Exact Android Loading / EmptyStateCard / 2-Column PibGridCard Grid
                 if app.isLoadingPibs && app.pibs.isEmpty {
                     VStack(spacing: 12) {
-                        ProgressView().tint(colors.primaryAction).scaleEffect(1.1)
+                        ProgressView().tint(SiapColors.brandAmber).scaleEffect(1.1)
                         Text("Memuat daftar PIB dari server SIAP...")
                             .font(.system(size: 13.5, weight: .medium))
                             .foregroundStyle(colors.textSecondary)
                     }
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 48)
-                } else if filteredPibs.isEmpty {
-                    VStack(spacing: 12) {
-                        Image(systemName: "tray")
-                            .font(.system(size: 38))
+                } else if app.pibs.isEmpty {
+                    // Exact Android EmptyStateCard
+                    VStack(spacing: 10) {
+                        Text("Belum ada dokumen PIB aktif. Tarik ke bawah untuk memuat ulang.")
+                            .font(.system(size: 15, weight: .medium))
                             .foregroundStyle(colors.textHint)
-                        Text(app.pibs.isEmpty ? "Belum ada penugasan PIB aktif" : "Tidak ada PIB cocok dengan filter")
-                            .font(.system(size: 15, weight: .bold))
-                            .foregroundStyle(colors.textPrimary)
-                        if let err = app.lastPibError {
+                            .multilineTextAlignment(.center)
+                        if let err = app.lastPibError, !err.isEmpty {
                             Text(err)
                                 .font(.system(size: 12))
                                 .foregroundStyle(colors.danger)
                                 .multilineTextAlignment(.center)
                         }
-                        SiapOutlinedButton("Muat Ulang Beranda", icon: "arrow.clockwise", color: colors.primaryAction) {
-                            Task { await app.loadPibs() }
-                        }
-                        .frame(maxWidth: 210)
                     }
-                    .padding(24)
                     .frame(maxWidth: .infinity)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 28)
                     .background(colors.surface)
                     .overlay(
-                        RoundedRectangle(cornerRadius: 16, style: .continuous)
-                            .stroke(colors.cardBorder, lineWidth: 1)
+                        RoundedRectangle(cornerRadius: 14, style: .continuous)
+                            .stroke(colors.divider, lineWidth: 1)
                     )
-                    .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
                     .padding(.horizontal, 12)
+                    .padding(.top, 6)
                 } else {
-                    ForEach(filteredPibs) { doc in
-                        PibGridCardView(
-                            doc: doc,
-                            colors: colors,
-                            isCompact: app.isCompact,
-                            onTap: { app.openPib(doc) },
-                            onWhatsAppPfpd: {
-                                app.openWhatsApp(
-                                    phone: doc.noHpPfpd,
-                                    message: "Yth. \(doc.namaPfpd), konfirmasi pemeriksaan fisik PIB \(doc.noPib) (\(doc.importir))."
-                                )
-                            },
-                            onWhatsAppPj: {
-                                app.openWhatsApp(
-                                    phone: doc.hpPj,
-                                    message: "Selamat pagi/siang \(doc.namaPj), mohon kesiapan pemeriksaan fisik PIB \(doc.noPib) (\(doc.importir)) di TPS \(doc.kodeTps)."
-                                )
-                            },
-                            onBatal: { batalTarget = doc }
-                        )
-                        .padding(.horizontal, 12)
+                    LazyVGrid(columns: gridColumns, spacing: 8) {
+                        ForEach(app.pibs) { doc in
+                            PibGridCardView(
+                                doc: doc,
+                                colors: colors,
+                                isCompact: app.isCompact,
+                                onTap: { app.openPib(doc) },
+                                onWhatsAppPfpd: {
+                                    app.openWhatsApp(
+                                        phone: doc.noHpPfpd,
+                                        message: "Yth. \(doc.namaPfpd), konfirmasi pemeriksaan fisik PIB \(doc.noPib) (\(doc.importir))."
+                                    )
+                                },
+                                onWhatsAppPj: {
+                                    app.openWhatsApp(
+                                        phone: doc.hpPj,
+                                        message: "Selamat pagi/siang \(doc.namaPj), mohon kesiapan pemeriksaan fisik PIB \(doc.noPib) (\(doc.importir)) di TPS \(doc.kodeTps)."
+                                    )
+                                },
+                                onBatal: { batalTarget = doc }
+                            )
+                        }
                     }
+                    .padding(.horizontal, 12)
+                    .padding(.top, 2)
                 }
             }
-            .padding(.bottom, 18)
+            .padding(.bottom, 20)
         }
         .refreshable {
             await app.loadPibs()
@@ -915,16 +806,6 @@ struct HomeDashboardView: View {
             Text("Batalkan pemeriksaan untuk PIB No. \(batalTarget?.noPib ?? "")?")
         }
     }
-
-    private func filterChipTitle(_ item: HomeStatusFilter) -> String {
-        switch item {
-        case .semua: return "Semua (\(app.pibs.count))"
-        case .siap: return "Siap (\(siapCount))"
-        case .sedang: return "Sedang (\(sedangCount))"
-        case .selesai: return "Selesai (\(selesaiCount))"
-        case .atensi: return "Atensi (\(app.pibs.filter(\.hasAtensi).count))"
-        }
-    }
 }
 
 struct HomeMetricBox: View {
@@ -948,7 +829,7 @@ struct HomeMetricBox: View {
     }
 }
 
-// MARK: - Authentic Android PibGridCard
+// MARK: - Authentic Android 2-Column PibGridCard (Exact Visual Match)
 
 struct PibGridCardView: View {
     @EnvironmentObject var app: AppState
@@ -960,244 +841,182 @@ struct PibGridCardView: View {
     let onWhatsAppPj: () -> Void
     let onBatal: () -> Void
 
+    private var statusHeaderInfo: (label: String, bg: Color, fg: Color) {
+        let s = doc.status.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+        if s.contains("BAP") || s.contains("SELESAI") {
+            return (
+                s.contains("BAP") ? "SUDAH BAP" : "SELESAI",
+                colors.isDark ? Color(hex: 0x0E2A3A) : Color(hex: 0xE0F2FE),
+                colors.isDark ? Color(hex: 0x38BDF8) : Color(hex: 0x0369A1)
+            )
+        } else if s.contains("BELUM") || s == "IP" || s.contains("SIAP") {
+            return (
+                "BELUM PERIKSA",
+                colors.isDark ? Color(hex: 0x361E1E) : Color(hex: 0xFEE2E2),
+                colors.isDark ? Color(hex: 0xFCA5A5) : Color(hex: 0xB91C1C)
+            )
+        } else {
+            return (
+                "PROSES",
+                colors.isDark ? Color(hex: 0x0F2B1D) : Color(hex: 0xDCFCE7),
+                colors.isDark ? Color(hex: 0x4ADE80) : Color(hex: 0x15803D)
+            )
+        }
+    }
+
+    private var pfpdInitials: String {
+        let cleaned = doc.namaPfpd
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .components(separatedBy: CharacterSet.whitespaces)
+            .filter { !$0.isEmpty && $0 != "-" }
+        if cleaned.isEmpty { return "-" }
+        if cleaned.count == 1 { return String(cleaned[0].prefix(2)).uppercased() }
+        let a = cleaned[0].prefix(1)
+        let b = cleaned[1].prefix(1)
+        return "\(a)\(b)".uppercased()
+    }
+
+    private var containerBadgeLabel: String {
+        let j = doc.jenisKontainer.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+        if j.isEmpty || j == "-" { return doc.isLclDefault ? "LCL" : "FCL" }
+        return j.contains("LCL") ? "LCL" : "FCL"
+    }
+
     var body: some View {
-        let st = colors.statusBadgeStyle(for: doc.status)
+        let hdr = statusHeaderInfo
 
         Button(action: onTap) {
-            HStack(spacing: 0) {
-                Rectangle()
-                    .fill(st.accent)
-                    .frame(width: 4.5)
+            VStack(alignment: .leading, spacing: 0) {
+                // Top Status Header Bar (PROSES / BELUM PERIKSA / SUDAH BAP + FCL/LCL chip)
+                HStack(spacing: 4) {
+                    Text(hdr.label)
+                        .font(.system(size: 10.5, weight: .heavy))
+                        .foregroundStyle(hdr.fg)
+                        .lineLimit(1)
 
-                VStack(alignment: .leading, spacing: isCompact ? 6 : 9) {
-                    // Row 1: PIB No + Date + Status Badge
-                    HStack(alignment: .top, spacing: 8) {
+                    Spacer(minLength: 4)
+
+                    Text(containerBadgeLabel)
+                        .font(.system(size: 9.5, weight: .heavy))
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(colors.isDark ? Color(hex: 0x112536) : colors.primaryContainer)
+                        .foregroundStyle(colors.isDark ? SiapColors.brandSky : colors.onPrimaryContainer)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 4, style: .continuous)
+                                .stroke(SiapColors.brandSky.opacity(0.45), lineWidth: 0.9)
+                        )
+                        .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 7)
+                .background(hdr.bg)
+
+                VStack(alignment: .leading, spacing: 8) {
+                    // Middle Row: Big PIB No + Date | TPS Box
+                    HStack(alignment: .top, spacing: 6) {
                         VStack(alignment: .leading, spacing: 2) {
-                            HStack(spacing: 6) {
-                                Text("PIB \(doc.noPib)")
-                                    .font(.system(size: isCompact ? 15 : 16.5, weight: .heavy, design: .rounded))
-                                    .foregroundStyle(colors.textPrimary)
+                            Text(doc.noPib)
+                                .font(.system(size: 19, weight: .heavy, design: .rounded))
+                                .foregroundStyle(colors.textPrimary)
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.8)
 
-                                if !doc.jenisKontainer.isEmpty && doc.jenisKontainer != "-" {
-                                    Text(doc.isLclDefault ? "LCL" : "FCL")
-                                        .font(.system(size: 10, weight: .heavy))
-                                        .padding(.horizontal, 6)
-                                        .padding(.vertical, 2)
-                                        .background(colors.primaryContainer)
-                                        .foregroundStyle(colors.onPrimaryContainer)
-                                        .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
-                                }
-
-                                if !doc.barcon.isEmpty && doc.barcon != "-" && doc.barcon != "0" {
-                                    Text("BARCON")
-                                        .font(.system(size: 9.5, weight: .heavy))
-                                        .padding(.horizontal, 6)
-                                        .padding(.vertical, 2)
-                                        .background(colors.warningBoxBg)
-                                        .foregroundStyle(colors.warningBoxText)
-                                        .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
-                                }
-                            }
                             Text(SiapCrypto.formatDisplayDate(doc.tglPib))
                                 .font(.system(size: 11.5, weight: .medium))
-                                .foregroundStyle(colors.textHint)
+                                .foregroundStyle(colors.textSecondary)
+                                .lineLimit(1)
                         }
 
                         Spacer(minLength: 4)
-                        SiapStatusChip(text: doc.status, colors: colors)
+
+                        if !doc.kodeTps.isEmpty && doc.kodeTps != "-" {
+                            VStack(spacing: 1) {
+                                Text("TPS")
+                                    .font(.system(size: 8.5, weight: .bold))
+                                    .foregroundStyle(colors.textHint)
+                                Text(doc.kodeTps)
+                                    .font(.system(size: 11, weight: .heavy, design: .monospaced))
+                                    .foregroundStyle(colors.textPrimary)
+                                    .lineLimit(1)
+                            }
+                            .padding(.horizontal, 7)
+                            .padding(.vertical, 4)
+                            .background(colors.isDark ? Color(hex: 0x172433) : colors.surfaceElevated)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                    .stroke(colors.cardBorder, lineWidth: 0.8)
+                            )
+                            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                        }
                     }
 
-                    // Row 2: Importir
-                    Text(doc.importir)
-                        .font(.system(size: isCompact ? 13 : 14, weight: .bold))
+                    // Importir Name
+                    Text(doc.importir == "-" || doc.importir.isEmpty ? "IMPORTIR -" : doc.importir.uppercased())
+                        .font(.system(size: 12, weight: .semibold))
                         .foregroundStyle(colors.textPrimary)
                         .lineLimit(2)
                         .multilineTextAlignment(.leading)
+                        .frame(maxWidth: .infinity, minHeight: 30, alignment: .topLeading)
 
-                    // Row 3: Meta pills (TPS, Persen, Item, IP)
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        HStack(spacing: 6) {
-                            if !doc.kodeTps.isEmpty && doc.kodeTps != "-" {
-                                SiapMetaTag(icon: "building.2.fill", text: "TPS \(doc.kodeTps)", bg: colors.surfaceElevated, fg: colors.textSecondary)
-                            }
-                            if !doc.persentasePeriksa.isEmpty && doc.persentasePeriksa != "-" {
-                                SiapMetaTag(icon: "percent", text: doc.persentasePeriksa, bg: colors.surfaceElevated, fg: colors.secondary)
-                            }
-                            if !doc.jumlahItem.isEmpty && doc.jumlahItem != "-" {
-                                SiapMetaTag(icon: "shippingbox", text: "\(doc.jumlahItem) Item", bg: colors.surfaceElevated, fg: colors.textSecondary)
-                            }
-                            if !doc.ipCeisa.isEmpty && doc.ipCeisa != "-" {
-                                SiapMetaTag(icon: "doc.plaintext", text: "IP \(doc.ipCeisa)", bg: colors.surfaceElevated, fg: colors.textHint)
-                            }
-                        }
-                    }
-
-                    // Row 4: Atensi PFPD Warning Box
                     if doc.hasAtensi {
-                        HStack(alignment: .top, spacing: 7) {
+                        HStack(spacing: 4) {
                             Image(systemName: "exclamationmark.triangle.fill")
-                                .font(.system(size: 12))
-                                .foregroundStyle(colors.warningBoxText)
-                                .padding(.top, 1)
-                            Text("Atensi: \(doc.atensi)")
-                                .font(.system(size: 11.5, weight: .semibold))
-                                .foregroundStyle(colors.warningBoxText)
-                                .lineLimit(2)
-                                .multilineTextAlignment(.leading)
+                                .font(.system(size: 10))
+                            Text("ATENSI")
+                                .font(.system(size: 9.5, weight: .heavy))
                         }
-                        .padding(.horizontal, 9)
-                        .padding(.vertical, 7)
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 3)
                         .background(colors.warningBoxBg)
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                .stroke(colors.warningBoxBorder.opacity(0.55), lineWidth: 1)
-                        )
-                        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                        .foregroundStyle(colors.warningBoxText)
+                        .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
                     }
 
-                    // Row 5: PFPD / PJ Split + Quick Actions (Matches PfpdPjSplit)
-                    Divider().overlay(colors.divider)
+                    // Bottom PFPD Row (Amber Initials Circle + PFPD Name)
+                    if !doc.namaPfpd.isEmpty && doc.namaPfpd != "-" {
+                        HStack(spacing: 6) {
+                            Text(pfpdInitials)
+                                .font(.system(size: 10, weight: .heavy))
+                                .foregroundStyle(Color(hex: 0x0B131D))
+                                .frame(width: 24, height: 24)
+                                .background(SiapColors.brandAmber)
+                                .clipShape(Circle())
 
-                    HStack(spacing: 8) {
-                        VStack(alignment: .leading, spacing: 2) {
-                            if !doc.namaPfpd.isEmpty && doc.namaPfpd != "-" {
-                                Text("PFPD: \(doc.namaPfpd)")
-                                    .font(.system(size: 11, weight: .medium))
-                                    .foregroundStyle(colors.textSecondary)
-                                    .lineLimit(1)
-                            }
-                            if !doc.namaPj.isEmpty && doc.namaPj != "-" {
-                                Text("PJ: \(doc.namaPj)")
-                                    .font(.system(size: 11, weight: .medium))
-                                    .foregroundStyle(colors.textSecondary)
-                                    .lineLimit(1)
-                            }
-                        }
-                        .frame(maxWidth: .infinity, alignment: .leading)
-
-                        if !doc.noHpPfpd.isEmpty && doc.noHpPfpd != "-" {
-                            Button(action: onWhatsAppPfpd) {
-                                HStack(spacing: 3) {
-                                    Image(systemName: "message.fill")
-                                    Text("PFPD")
-                                }
-                                .font(.system(size: 10.5, weight: .bold))
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 5)
-                                .background(colors.success.opacity(0.15))
-                                .foregroundStyle(colors.success)
-                                .clipShape(Capsule())
-                            }
-                            .buttonStyle(.plain)
-                        }
-
-                        if !doc.hpPj.isEmpty && doc.hpPj != "-" {
-                            Button(action: onWhatsAppPj) {
-                                HStack(spacing: 3) {
-                                    Image(systemName: "message.fill")
-                                    Text("PJ")
-                                }
-                                .font(.system(size: 10.5, weight: .bold))
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 5)
-                                .background(colors.success.opacity(0.15))
-                                .foregroundStyle(colors.success)
-                                .clipShape(Capsule())
-                            }
-                            .buttonStyle(.plain)
-                        }
-
-                        Button(action: onBatal) {
-                            Image(systemName: "xmark.circle")
-                                .font(.system(size: 16, weight: .semibold))
-                                .foregroundStyle(colors.danger.opacity(0.85))
-                                .padding(4)
-                        }
-                        .buttonStyle(.plain)
-                    }
-
-                    // Row 6: Authentic Android Selesai / Sudah BAP Action Row (Aju Barcon | Lihat BAP | Kendala)
-                    if doc.isSudahBapOrSelesai || (!doc.barcon.isEmpty && doc.barcon != "-" && doc.barcon != "0") {
-                        let barconDone = app.isBarconSubmitted(for: doc)
-                        HStack(spacing: 7) {
-                            Button {
-                                app.openBarconForm(for: doc)
-                            } label: {
-                                HStack(spacing: 4) {
-                                    Image(systemName: barconDone ? "checkmark.circle.fill" : "shippingbox.fill")
-                                        .font(.system(size: 11, weight: .bold))
-                                    Text(barconDone ? "Barcon Diajukan" : "Aju Barcon")
-                                        .font(.system(size: 11.5, weight: .bold))
-                                        .lineLimit(1)
-                                }
-                                .frame(maxWidth: .infinity)
-                                .padding(.vertical, 7)
-                                .padding(.horizontal, 8)
-                                .background(barconDone ? colors.success.opacity(0.18) : colors.primaryAction)
-                                .foregroundStyle(barconDone ? colors.success : colors.onPrimaryAction)
-                                .overlay(
-                                    RoundedRectangle(cornerRadius: 9, style: .continuous)
-                                        .stroke(barconDone ? colors.success.opacity(0.55) : Color.clear, lineWidth: 1)
-                                )
-                                .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
-                            }
-                            .buttonStyle(.plain)
-
-                            if doc.isSudahBapOrSelesai {
-                                Button {
-                                    Task { await app.openBapForPib(doc) }
-                                } label: {
-                                    HStack(spacing: 4) {
-                                        Image(systemName: "doc.text.fill")
-                                            .font(.system(size: 11, weight: .bold))
-                                        Text("BAP")
-                                            .font(.system(size: 11.5, weight: .bold))
-                                    }
-                                    .padding(.vertical, 7)
-                                    .padding(.horizontal, 10)
-                                    .background(colors.primaryContainer)
-                                    .foregroundStyle(colors.onPrimaryContainer)
-                                    .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
-                                }
-                                .buttonStyle(.plain)
-                            }
-
-                            Button {
-                                app.openKendalaTemuanForm(for: doc)
-                            } label: {
-                                HStack(spacing: 3) {
-                                    Image(systemName: "exclamationmark.bubble.fill")
-                                        .font(.system(size: 11, weight: .bold))
-                                    Text("Kendala")
-                                        .font(.system(size: 11, weight: .bold))
-                                }
-                                .padding(.vertical, 7)
-                                .padding(.horizontal, 9)
-                                .background(colors.surfaceElevated)
+                            Text(doc.namaPfpd.uppercased())
+                                .font(.system(size: 11, weight: .medium))
                                 .foregroundStyle(colors.textSecondary)
-                                .overlay(
-                                    RoundedRectangle(cornerRadius: 9, style: .continuous)
-                                        .stroke(colors.cardBorder, lineWidth: 1)
-                                )
-                                .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
-                            }
-                            .buttonStyle(.plain)
+                                .lineLimit(1)
                         }
                         .padding(.top, 2)
                     }
                 }
-                .padding(isCompact ? 11 : 13)
+                .padding(10)
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
             .background(colors.surface)
             .overlay(
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
                     .stroke(colors.cardBorder, lineWidth: 1)
             )
-            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-            .shadow(color: Color.black.opacity(colors.isDark ? 0.22 : 0.05), radius: 5, y: 2)
+            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         }
         .buttonStyle(.plain)
+        .contextMenu {
+            if !doc.noHpPfpd.isEmpty && doc.noHpPfpd != "-" {
+                Button { onWhatsAppPfpd() } label: {
+                    Label("WhatsApp PFPD", systemImage: "message.fill")
+                }
+            }
+            if !doc.hpPj.isEmpty && doc.hpPj != "-" {
+                Button { onWhatsAppPj() } label: {
+                    Label("WhatsApp PJ", systemImage: "message.fill")
+                }
+            }
+            Button(role: .destructive) { onBatal() } label: {
+                Label("Batalkan Pemeriksaan", systemImage: "xmark.circle")
+            }
+        }
     }
 }
 
