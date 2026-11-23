@@ -4580,17 +4580,17 @@ struct UserTabView: View {
                     HStack(spacing: 6) {
                         Image(systemName: app.isTrollStoreUrlSchemeReady ? "checkmark.seal.fill" : "exclamationmark.triangle.fill")
                             .font(.system(size: 11.5))
-                            .foregroundStyle(app.isTrollStoreUrlSchemeReady ? colors.successText : colors.warningText)
+                            .foregroundStyle(app.isTrollStoreUrlSchemeReady ? colors.success : colors.warningBoxText)
                         Text(app.isTrollStoreUrlSchemeReady
                              ? "TrollStore 1-Tap Siap (URL Scheme Aktif)"
                              : "Aktifkan URL Scheme di TrollStore → Settings untuk 1-Tap Update")
                             .font(.system(size: 11, weight: .semibold))
-                            .foregroundStyle(app.isTrollStoreUrlSchemeReady ? colors.successText : colors.warningText)
+                            .foregroundStyle(app.isTrollStoreUrlSchemeReady ? colors.success : colors.warningBoxText)
                         Spacer()
                     }
                     .padding(.horizontal, 10)
                     .padding(.vertical, 7)
-                    .background(app.isTrollStoreUrlSchemeReady ? colors.successContainer : colors.warningContainer)
+                    .background(app.isTrollStoreUrlSchemeReady ? colors.success.opacity(0.14) : colors.warningBoxBg)
                     .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
 
                     Toggle(isOn: $app.autoCheckUpdates) {
@@ -4828,16 +4828,16 @@ struct UpdatePromptSheet: View {
                     // TrollStore Status Pill
                     HStack(spacing: 8) {
                         Image(systemName: app.isTrollStoreUrlSchemeReady ? "bolt.shield.fill" : "info.circle.fill")
-                            .foregroundStyle(app.isTrollStoreUrlSchemeReady ? colors.successText : colors.warningText)
+                            .foregroundStyle(app.isTrollStoreUrlSchemeReady ? colors.success : colors.warningBoxText)
                         Text(app.isTrollStoreUrlSchemeReady
                              ? "TrollStore URL Scheme aktif — ketuk tombol di bawah untuk unduh & pasang otomatis 1-tap."
                              : "Tips: Nyalakan TrollStore → Settings → URL Scheme Enabled agar update bisa langsung 1-tap tanpa Safari.")
                             .font(.system(size: 11.5, weight: .medium))
-                            .foregroundStyle(app.isTrollStoreUrlSchemeReady ? colors.successText : colors.warningText)
+                            .foregroundStyle(app.isTrollStoreUrlSchemeReady ? colors.success : colors.warningBoxText)
                     }
                     .padding(12)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(app.isTrollStoreUrlSchemeReady ? colors.successContainer : colors.warningContainer)
+                    .background(app.isTrollStoreUrlSchemeReady ? colors.success.opacity(0.14) : colors.warningBoxBg)
                     .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
 
                     // Apa yang Baru / Changelog
