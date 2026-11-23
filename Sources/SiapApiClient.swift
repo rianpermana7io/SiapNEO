@@ -871,6 +871,169 @@ final class SiapApiClient {
         return AppUpdateInfo(remoteVersion: remoteVer, remoteBuild: remoteBuild, ipaDownloadUrl: ipaUrl, notes: body)
     }
 
+    /// Helper to turn dd-MM-yyyy or yyyy-MM-dd (with optional HH:mm:ss) into lexicographically sortable ISO timestamp
+    func toSortableTimestamp(_ raw: String) -> String {
+        let s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !s.isEmpty && s != "-" else { return "" }
+        let parts = s.split(separator: " ", maxSplits: 1)
+        let datePart = String(parts[0])
+        let timePart = parts.count > 1 ? String(parts[1]) : "00:00:00"
+        let comps = datePart.split(whereSeparator: { $0 == "-" || $0 == "/" || $0 == "." })
+        if comps.count == 3 {
+            if comps[0].count == 4 {
+                return "\(comps[0])-\(comps[1])-\(comps[2]) \(timePart)"
+            } else if comps[2].count == 4 {
+                return "\(comps[2])-\(comps[1])-\(comps[0]) \(timePart)"
+            }
+        }
+        return s
+    }
+
+    /// Exact port of Siap3WebClient.fetchBrowsePage (POST /siapfb_pemeriksa/browse_data) — returns AssignedIpItem sorted newest-first
+    func fetchAssignedIpList(
+        username: String,
+        password: String,
+        fallbackEmail: String = "",
+        start: Int = 0,
+        length: Int = 25,
+        query: String = ""
+    ) async throws -> (items: [AssignedIpItem], totalRecords: Int) {
+        for attempt in 0..<2 {
+            try await ensureSiap3Login(username: username, password: password, fallbackEmail: fallbackEmail, force: attempt > 0)
+            guard let url = URL(string: "\(SiapCrypto.siap3Base)/siapfb_pemeriksa/browse_data") else {
+                throw SiapApiError.invalidURL
+            }
+            var req = URLRequest(url: url)
+            req.httpMethod = "POST"
+            req.setValue(desktopUserAgent, forHTTPHeaderField: "User-Agent")
+            req.setValue("application/x-www-form-urlencoded; charset=UTF-8", forHTTPHeaderField: "Content-Type")
+            req.setValue("XMLHttpRequest", forHTTPHeaderField: "X-Requested-With")
+            req.setValue("\(SiapCrypto.siap3Base)/home", forHTTPHeaderField: "Referer")
+            req.httpBody = formEncode(buildDataTablesFields(start: start, length: length, search: query, columnCount: 9, orderable: true))
+
+            let (data, resp) = try await siap3Session.data(for: req)
+            let body = String(data: data, encoding: .utf8) ?? ""
+            if isSiap3SessionExpired(response: resp, body: body) {
+                invalidateSiap3Session()
+                if attempt == 0 { continue }
+                throw SiapApiError.message("Sesi SIAP 3.0 berakhir. Silakan coba lagi.")
+            }
+
+            guard let dict = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
+                return ([], 0)
+            }
+            let total = (dict["recordsFiltered"] as? Int) ?? (dict["recordsTotal"] as? Int) ?? 0
+            let rawRows = (dict["data"] as? [[Any]]) ?? (dict["aaData"] as? [[Any]]) ?? []
+
+            var parsed: [AssignedIpItem] = rawRows.compactMap { row -> AssignedIpItem? in
+                guard row.count >= 5 else { return nil }
+                func rawCol(_ idx: Int) -> String { idx < row.count ? String(describing: row[idx]) : "" }
+                func col(_ idx: Int) -> String { stripHtml(rawCol(idx)) }
+
+                let kodeTiket = col(0)
+                let importir = col(1).isEmpty ? "-" : col(1)
+                var noPib = col(2)
+                if let slashIdx = noPib.firstIndex(of: "/") {
+                    noPib = String(noPib[..<slashIdx]).trimmingCharacters(in: .whitespacesAndNewlines)
+                }
+                let tglPib = col(3).isEmpty ? "-" : col(3)
+                let col4 = col(4)
+                let jenisKontainer = col4.uppercased().contains("LCL") ? "LCL" : "FCL"
+                let jumlahKontainer = col4.isEmpty ? "1 Cont" : col4
+                let tps = col(5).isEmpty ? "-" : col(5)
+                let waktuIp = col(6).isEmpty ? "-" : col(6)
+                let rawStatusCol = rawCol(7)
+                var statusText = stripHtml(rawStatusCol)
+                if statusText.isEmpty { statusText = "BELUM PERIKSA" }
+
+                let actionHtml = rawCol(8)
+                let hashId = extractFirstMatch(pattern: #"(?:bapp_new_ekspor|cetak_bap|foto_detail|detail)/([A-Za-z0-9+/=_-]+?)(?=["'?#&\s<]|$)"#, in: actionHtml)
+                    ?? extractFirstMatch(pattern: #"data(?:-id)?=["']([^"']+)["']"#, in: actionHtml)
+                    ?? ""
+
+                let isSudahBap = statusText.lowercased().contains("sudah bap")
+                    || statusText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "bap"
+                    || actionHtml.lowercased().contains("cetak_bap")
+
+                // Extract all href links from col 8
+                var hrefs: [String] = []
+                if let hrefRegex = try? NSRegularExpression(pattern: #"href=["']([^"']+)["']"#, options: [.caseInsensitive]) {
+                    let nsAct = actionHtml as NSString
+                    for m in hrefRegex.matches(in: actionHtml, range: NSRange(location: 0, length: nsAct.length)) {
+                        let u = nsAct.substring(with: m.range(at: 1)).trimmingCharacters(in: .whitespacesAndNewlines)
+                        if !u.isEmpty && !u.hasPrefix("#") && !u.lowercased().hasPrefix("javascript") {
+                            hrefs.append(u)
+                        }
+                    }
+                }
+
+                let cetakHref = hrefs.first(where: { $0.lowercased().contains("cetak") })
+                let buatHref = hrefs.first(where: { $0.lowercased().contains("bap") && !$0.lowercased().contains("cetak") })
+
+                let linkCetakBap: String
+                if isSudahBap {
+                    if let ch = cetakHref {
+                        linkCetakBap = absolutizeSiap3(ch)
+                    } else if !hashId.isEmpty {
+                        linkCetakBap = "https://bcpriok.net/slim3.0/penerimaan_dokumen_merah_kuning/cetak_bap/\(hashId)"
+                    } else {
+                        linkCetakBap = ""
+                    }
+                } else {
+                    linkCetakBap = ""
+                }
+
+                let linkBuatBap: String
+                if !isSudahBap {
+                    if let bh = buatHref {
+                        linkBuatBap = absolutizeSiap3(bh)
+                    } else if !hashId.isEmpty {
+                        linkBuatBap = "\(SiapCrypto.siap3Base)/siapfb_pemeriksa/bapp_new_ekspor/\(hashId)"
+                    } else {
+                        linkBuatBap = ""
+                    }
+                } else {
+                    linkBuatBap = ""
+                }
+
+                return AssignedIpItem(
+                    kodeTiket: kodeTiket,
+                    noPib: noPib,
+                    tglPib: tglPib,
+                    importir: importir,
+                    jenisDokumen: "PIB",
+                    jenisKontainer: jenisKontainer,
+                    jumlahKontainer: jumlahKontainer,
+                    tps: tps,
+                    waktuIp: waktuIp,
+                    status: isSudahBap ? "SUDAH BAP" : statusText,
+                    namaPj: "-",
+                    hpPj: "-",
+                    namaPfpd: "-",
+                    hpPfpd: "-",
+                    atensi: "-",
+                    hashId: hashId,
+                    linkCetakBap: linkCetakBap,
+                    linkBuatBap: linkBuatBap
+                )
+            }
+
+            // Sort newest documents first (by waktuIp, fallback tglPib)
+            parsed.sort { a, b in
+                let ka = toSortableTimestamp(a.waktuIp)
+                let kb = toSortableTimestamp(b.waktuIp)
+                if ka != kb { return ka > kb }
+                let ta = toSortableTimestamp(a.tglPib)
+                let tb = toSortableTimestamp(b.tglPib)
+                if ta != tb { return ta > tb }
+                return a.noPib > b.noPib
+            }
+
+            return (parsed, total)
+        }
+        return ([], 0)
+    }
+
     /// Searches SIAP 3.0 siapfb_pemeriksa/browse_data to find cetak_bap URL for a PIB
     func fetchBapUrlForPib(username: String, password: String, fallbackEmail: String = "", noPib: String) async throws -> String? {
         let digits = noPib.filter(\.isNumber)

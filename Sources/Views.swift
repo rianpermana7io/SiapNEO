@@ -29,9 +29,14 @@ final class AppState: ObservableObject {
     @Published var session: UserSession?
     @Published var pibs: [PibDocument] = []
     @Published var lorongItems: [InstruksiLorongItem] = []
+    @Published var assignedIps: [AssignedIpItem] = []
     @Published var isLoadingPibs = false
     @Published var isLoadingLorong = false
+    @Published var isLoadingAssignedIps = false
     @Published var lastPibError: String?
+    @Published var assignedIpError: String?
+    @Published var assignedIpTotal = 0
+    @Published var assignedIpHasMore = false
     @Published var lastUpdatedText: String = ""
     @Published var toastMessage: String?
 
@@ -238,6 +243,10 @@ final class AppState: ObservableObject {
     func logout() {
         self.session = nil
         self.pibs = []
+        self.assignedIps = []
+        self.assignedIpTotal = 0
+        self.assignedIpHasMore = false
+        self.assignedIpError = nil
         self.lorongItems = []
         self.selectedPib = nil
         self.activeUploadContext = nil
@@ -260,7 +269,13 @@ final class AppState: ObservableObject {
         lastPibError = nil
         defer { isLoadingPibs = false }
         do {
-            pibs = try await SiapApiClient.shared.fetchHomescreen(nip: nip)
+            let fetched = try await SiapApiClient.shared.fetchHomescreen(nip: nip)
+            pibs = fetched.sorted { a, b in
+                let ka = SiapApiClient.shared.toSortableTimestamp(a.tglPib)
+                let kb = SiapApiClient.shared.toSortableTimestamp(b.tglPib)
+                if ka != kb { return ka > kb }
+                return a.noPib > b.noPib
+            }
             let df = SiapCrypto.wibFormatter("HH:mm")
             lastUpdatedText = "Diperbarui \(df.string(from: Date())) WIB"
         } catch {
@@ -269,12 +284,49 @@ final class AppState: ObservableObject {
         }
     }
 
+    func loadAssignedIps(query: String = "", reset: Bool = true) async {
+        guard let sess = session else { return }
+        isLoadingAssignedIps = true
+        assignedIpError = nil
+        defer { isLoadingAssignedIps = false }
+        let startIdx = reset ? 0 : assignedIps.count
+        let pageSize = reset ? 25 : 15
+        do {
+            let res = try await SiapApiClient.shared.fetchAssignedIpList(
+                username: sess.username,
+                password: sess.password,
+                fallbackEmail: sess.usernameEmail,
+                start: startIdx,
+                length: pageSize,
+                query: query
+            )
+            if reset {
+                assignedIps = res.items
+            } else {
+                let existing = Set(assignedIps.map(\.id))
+                let fresh = res.items.filter { !existing.contains($0.id) }
+                assignedIps.append(contentsOf: fresh)
+            }
+            assignedIpTotal = max(res.totalRecords, assignedIps.count)
+            assignedIpHasMore = res.items.count >= pageSize && assignedIps.count < assignedIpTotal
+        } catch {
+            assignedIpError = error.localizedDescription
+            showToast("Gagal memuat Daftar IP: \(error.localizedDescription)")
+        }
+    }
+
     func loadLorong() async {
         guard let nip = session?.nip, !nip.isEmpty else { return }
         isLoadingLorong = true
         defer { isLoadingLorong = false }
         do {
-            lorongItems = try await SiapApiClient.shared.fetchDetailKontainerNip(nip: nip)
+            let fetched = try await SiapApiClient.shared.fetchDetailKontainerNip(nip: nip)
+            lorongItems = fetched.sorted { a, b in
+                let ka = SiapApiClient.shared.toSortableTimestamp(a.tglPib)
+                let kb = SiapApiClient.shared.toSortableTimestamp(b.tglPib)
+                if ka != kb { return ka > kb }
+                return a.noPib > b.noPib
+            }
         } catch {
             showToast("Gagal memuat Instruksi Lorong: \(error.localizedDescription)")
         }
@@ -329,7 +381,7 @@ struct LoginView: View {
                             .font(.system(size: 13.5, weight: .medium))
                             .foregroundStyle(SiapColors.hintOnNavy)
 
-                        Text("Sistem Informasi Pemeriksaan Fisik • v1.19.5")
+                        Text("Sistem Informasi Pemeriksaan Fisik • v1.19.6")
                             .font(.system(size: 11, weight: .bold))
                             .padding(.horizontal, 12)
                             .padding(.vertical, 5)
@@ -2591,15 +2643,36 @@ struct ManualPibSheet: View {
     }
 }
 
-// MARK: - Tab 2: Instruksi Lorong
+// MARK: - Tab 2: Instruksi Pemeriksaan (Daftar IP Sudah Diperiksa + Aju Barcon + Instruksi Lorong)
 
 struct LorongTabView: View {
     @EnvironmentObject var app: AppState
     let colors: SiapColors
-    @State private var query = ""
 
-    private var filtered: [InstruksiLorongItem] {
-        let q = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    @State private var subMode = 0 // 0 = Daftar IP (SIAP 3.0), 1 = Instruksi Lorong
+    @State private var ipQuery = ""
+    @State private var ipFilter = 0 // 0 = Semua, 1 = Sudah BAP, 2 = Belum BAP
+    @State private var lorongQuery = ""
+
+    private var sudahBapCount: Int { app.assignedIps.filter(\.isSudahBap).count }
+    private var belumBapCount: Int { app.assignedIps.filter { !$0.isSudahBap }.count }
+
+    private var filteredIps: [AssignedIpItem] {
+        let q = ipQuery.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return app.assignedIps.filter { item in
+            if ipFilter == 1 && !item.isSudahBap { return false }
+            if ipFilter == 2 && item.isSudahBap { return false }
+            if q.isEmpty { return true }
+            return item.noPib.lowercased().contains(q)
+                || item.importir.lowercased().contains(q)
+                || item.tps.lowercased().contains(q)
+                || item.kodeTiket.lowercased().contains(q)
+                || item.status.lowercased().contains(q)
+        }
+    }
+
+    private var filteredLorong: [InstruksiLorongItem] {
+        let q = lorongQuery.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         if q.isEmpty { return app.lorongItems }
         return app.lorongItems.filter {
             $0.noContainer.lowercased().contains(q)
@@ -2612,107 +2685,437 @@ struct LorongTabView: View {
     var body: some View {
         ScrollView {
             LazyVStack(spacing: 10) {
-                HStack(spacing: 8) {
-                    Image(systemName: "magnifyingglass").foregroundStyle(colors.textHint)
-                    TextField("Cari Kontainer, PIB, Instruksi...", text: $query)
-                        .font(.system(size: 13.5))
-                        .foregroundStyle(colors.textPrimary)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                    if !query.isEmpty {
-                        Button { query = "" } label: {
-                            Image(systemName: "xmark.circle.fill").foregroundStyle(colors.textHint)
-                        }
-                        .buttonStyle(.plain)
+                // Mode Switcher: Daftar IP (Sudah Diperiksa) | Instruksi Lorong
+                HStack(spacing: 6) {
+                    BrowseSegmentPill(title: "Daftar IP (\(app.assignedIps.count))", active: subMode == 0, colors: colors) {
+                        subMode = 0
+                        if app.assignedIps.isEmpty { Task { await app.loadAssignedIps(query: ipQuery, reset: true) } }
                     }
-                    Button {
-                        Task { await app.loadLorong() }
-                    } label: {
-                        Image(systemName: "arrow.clockwise").foregroundStyle(colors.primaryAction)
+                    BrowseSegmentPill(title: "Instruksi Lorong (\(app.lorongItems.count))", active: subMode == 1, colors: colors) {
+                        subMode = 1
+                        if app.lorongItems.isEmpty { Task { await app.loadLorong() } }
                     }
-                    .buttonStyle(.plain)
                 }
-                .padding(11)
-                .background(colors.surface)
-                .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).stroke(colors.cardBorder, lineWidth: 1))
-                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                 .padding(.horizontal, 12)
                 .padding(.top, 10)
 
-                if app.isLoadingLorong && app.lorongItems.isEmpty {
-                    ProgressView("Memuat Instruksi Lorong...").tint(colors.primaryAction).padding(.top, 40)
-                } else if filtered.isEmpty {
-                    VStack(spacing: 10) {
-                        Image(systemName: "shippingbox").font(.system(size: 36)).foregroundStyle(colors.textHint)
-                        Text("Belum ada Instruksi Lorong").font(.system(size: 15, weight: .bold)).foregroundStyle(colors.textPrimary)
-                    }
-                    .padding(32)
-                    .frame(maxWidth: .infinity)
-                    .background(colors.surface)
-                    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-                    .padding(.horizontal, 12)
-                } else {
-                    ForEach(filtered) { item in
-                        VStack(alignment: .leading, spacing: 8) {
-                            HStack {
-                                Text(item.noContainer)
-                                    .font(.system(size: 15.5, weight: .heavy, design: .monospaced))
-                                    .foregroundStyle(colors.textPrimary)
-                                if !item.ukuranContainer.isEmpty && item.ukuranContainer != "-" {
-                                    Text("UK \(item.ukuranContainer)")
-                                        .font(.system(size: 11, weight: .bold))
-                                        .padding(.horizontal, 7)
-                                        .padding(.vertical, 3)
-                                        .background(colors.primaryContainer)
-                                        .foregroundStyle(colors.onPrimaryContainer)
-                                        .clipShape(Capsule())
-                                }
-                                Spacer()
-                                SiapStatusChip(text: item.status, colors: colors)
-                            }
-
-                            HStack(spacing: 8) {
-                                Text("PIB \(item.noPib) • \(SiapCrypto.formatDisplayDate(item.tglPib))")
-                                    .font(.system(size: 12, weight: .semibold))
-                                    .foregroundStyle(colors.textSecondary)
-                                Spacer()
+                if subMode == 0 {
+                    // Search + Server Search + Refresh
+                    HStack(spacing: 8) {
+                        HStack(spacing: 6) {
+                            Image(systemName: "magnifyingglass").foregroundStyle(colors.textHint)
+                            TextField("Cari No PIB, Importir, TPS...", text: $ipQuery)
+                                .font(.system(size: 13.5))
+                                .foregroundStyle(colors.textPrimary)
+                                .textInputAutocapitalization(.never)
+                                .autocorrectionDisabled()
+                                .onSubmit { Task { await app.loadAssignedIps(query: ipQuery, reset: true) } }
+                            if !ipQuery.isEmpty {
                                 Button {
-                                    UIPasteboard.general.string = item.noContainer
-                                    app.showToast("Disalin: \(item.noContainer)")
+                                    ipQuery = ""
+                                    Task { await app.loadAssignedIps(query: "", reset: true) }
                                 } label: {
-                                    Image(systemName: "doc.on.doc")
-                                        .font(.system(size: 12.5, weight: .bold))
-                                        .foregroundStyle(colors.secondary)
+                                    Image(systemName: "xmark.circle.fill").foregroundStyle(colors.textHint)
                                 }
                                 .buttonStyle(.plain)
                             }
-
-                            if !item.instruksiLorong.isEmpty && item.instruksiLorong != "-" {
-                                SiapMetaRow(label: "Instruksi", value: item.instruksiLorong, colors: colors)
-                            }
-                            if !item.pelaksanaanLorong.isEmpty && item.pelaksanaanLorong != "-" {
-                                SiapMetaRow(label: "Pelaksanaan", value: item.pelaksanaanLorong, colors: colors)
-                            }
-                            if !item.alasanLorong.isEmpty && item.alasanLorong != "-" {
-                                SiapMetaRow(label: "Alasan", value: item.alasanLorong, colors: colors)
-                            }
                         }
-                        .padding(13)
+                        .padding(11)
                         .background(colors.surface)
-                        .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).stroke(colors.cardBorder, lineWidth: 1))
+                        .overlay(RoundedRectangle(cornerRadius: 11, style: .continuous).stroke(colors.cardBorder, lineWidth: 1))
+                        .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
+
+                        Button {
+                            Task { await app.loadAssignedIps(query: ipQuery, reset: true) }
+                        } label: {
+                            Image(systemName: "arrow.clockwise")
+                                .font(.system(size: 14, weight: .bold))
+                                .foregroundStyle(colors.onPrimaryAction)
+                                .padding(11)
+                                .background(colors.primaryAction)
+                                .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(app.isLoadingAssignedIps)
+                    }
+                    .padding(.horizontal, 12)
+
+                    // Status Filter Chips (Semua | Sudah BAP | Belum BAP)
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 7) {
+                            IpFilterChip(title: "Terbaru (\(app.assignedIps.count))", active: ipFilter == 0, colors: colors) { ipFilter = 0 }
+                            IpFilterChip(title: "Sudah BAP (\(sudahBapCount))", active: ipFilter == 1, colors: colors) { ipFilter = 1 }
+                            IpFilterChip(title: "Belum BAP (\(belumBapCount))", active: ipFilter == 2, colors: colors) { ipFilter = 2 }
+                        }
+                        .padding(.horizontal, 12)
+                    }
+
+                    if let err = app.assignedIpError {
+                        HStack(spacing: 8) {
+                            Image(systemName: "exclamationmark.triangle.fill")
+                            Text(err).font(.system(size: 12))
+                        }
+                        .foregroundStyle(colors.danger)
+                        .padding(11)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(colors.danger.opacity(0.14))
+                        .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
+                        .padding(.horizontal, 12)
+                    }
+
+                    if app.isLoadingAssignedIps && app.assignedIps.isEmpty {
+                        VStack(spacing: 10) {
+                            ProgressView().tint(colors.primaryAction).scaleEffect(1.1)
+                            Text("Memuat Daftar IP Terbaru dari SIAP 3.0...")
+                                .font(.system(size: 13))
+                                .foregroundStyle(colors.textSecondary)
+                        }
+                        .padding(.vertical, 42)
+                    } else if filteredIps.isEmpty {
+                        VStack(spacing: 10) {
+                            Image(systemName: "doc.text.magnifyingglass")
+                                .font(.system(size: 36))
+                                .foregroundStyle(colors.textHint)
+                            Text("Belum ada Daftar IP ditemukan")
+                                .font(.system(size: 15, weight: .bold))
+                                .foregroundStyle(colors.textPrimary)
+                            SiapOutlinedButton("Muat Ulang Daftar IP", icon: "arrow.clockwise", color: colors.primaryAction) {
+                                Task { await app.loadAssignedIps(query: ipQuery, reset: true) }
+                            }
+                            .frame(maxWidth: 210)
+                        }
+                        .padding(26)
+                        .frame(maxWidth: .infinity)
+                        .background(colors.surface)
                         .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
                         .padding(.horizontal, 12)
+                    } else {
+                        ForEach(filteredIps) { item in
+                            AssignedIpCardView(item: item, colors: colors)
+                                .padding(.horizontal, 12)
+                        }
+
+                        if app.assignedIpHasMore {
+                            SiapOutlinedButton(
+                                app.isLoadingAssignedIps ? "Memuat..." : "Tampilkan 15 IP Lagi",
+                                icon: "plus.circle.fill",
+                                color: colors.primaryAction,
+                                bg: colors.surface
+                            ) {
+                                Task { await app.loadAssignedIps(query: ipQuery, reset: false) }
+                            }
+                            .disabled(app.isLoadingAssignedIps)
+                            .padding(.horizontal, 12)
+                            .padding(.top, 4)
+                        }
+                    }
+                } else {
+                    // Secondary Sub-Tab: Instruksi Lorong (detailkontainer_nip)
+                    HStack(spacing: 8) {
+                        Image(systemName: "magnifyingglass").foregroundStyle(colors.textHint)
+                        TextField("Cari Kontainer, PIB, Instruksi...", text: $lorongQuery)
+                            .font(.system(size: 13.5))
+                            .foregroundStyle(colors.textPrimary)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                        if !lorongQuery.isEmpty {
+                            Button { lorongQuery = "" } label: {
+                                Image(systemName: "xmark.circle.fill").foregroundStyle(colors.textHint)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                        Button {
+                            Task { await app.loadLorong() }
+                        } label: {
+                            Image(systemName: "arrow.clockwise").foregroundStyle(colors.primaryAction)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    .padding(11)
+                    .background(colors.surface)
+                    .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).stroke(colors.cardBorder, lineWidth: 1))
+                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    .padding(.horizontal, 12)
+
+                    if app.isLoadingLorong && app.lorongItems.isEmpty {
+                        ProgressView("Memuat Instruksi Lorong...").tint(colors.primaryAction).padding(.top, 40)
+                    } else if filteredLorong.isEmpty {
+                        VStack(spacing: 10) {
+                            Image(systemName: "shippingbox").font(.system(size: 36)).foregroundStyle(colors.textHint)
+                            Text("Belum ada Instruksi Lorong").font(.system(size: 15, weight: .bold)).foregroundStyle(colors.textPrimary)
+                        }
+                        .padding(32)
+                        .frame(maxWidth: .infinity)
+                        .background(colors.surface)
+                        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                        .padding(.horizontal, 12)
+                    } else {
+                        ForEach(filteredLorong) { item in
+                            VStack(alignment: .leading, spacing: 8) {
+                                HStack {
+                                    Text(item.noContainer)
+                                        .font(.system(size: 15.5, weight: .heavy, design: .monospaced))
+                                        .foregroundStyle(colors.textPrimary)
+                                    if !item.ukuranContainer.isEmpty && item.ukuranContainer != "-" {
+                                        Text("UK \(item.ukuranContainer)")
+                                            .font(.system(size: 11, weight: .bold))
+                                            .padding(.horizontal, 7)
+                                            .padding(.vertical, 3)
+                                            .background(colors.primaryContainer)
+                                            .foregroundStyle(colors.onPrimaryContainer)
+                                            .clipShape(Capsule())
+                                    }
+                                    Spacer()
+                                    SiapStatusChip(text: item.status, colors: colors)
+                                }
+
+                                HStack(spacing: 8) {
+                                    Text("PIB \(item.noPib) • \(SiapCrypto.formatDisplayDate(item.tglPib))")
+                                        .font(.system(size: 12, weight: .semibold))
+                                        .foregroundStyle(colors.textSecondary)
+                                    Spacer()
+                                    Button {
+                                        UIPasteboard.general.string = item.noContainer
+                                        app.showToast("Disalin: \(item.noContainer)")
+                                    } label: {
+                                        Image(systemName: "doc.on.doc")
+                                            .font(.system(size: 12.5, weight: .bold))
+                                            .foregroundStyle(colors.secondary)
+                                    }
+                                    .buttonStyle(.plain)
+                                }
+
+                                if !item.instruksiLorong.isEmpty && item.instruksiLorong != "-" {
+                                    SiapMetaRow(label: "Instruksi", value: item.instruksiLorong, colors: colors)
+                                }
+                                if !item.pelaksanaanLorong.isEmpty && item.pelaksanaanLorong != "-" {
+                                    SiapMetaRow(label: "Pelaksanaan", value: item.pelaksanaanLorong, colors: colors)
+                                }
+                                if !item.alasanLorong.isEmpty && item.alasanLorong != "-" {
+                                    SiapMetaRow(label: "Alasan", value: item.alasanLorong, colors: colors)
+                                }
+                            }
+                            .padding(13)
+                            .background(colors.surface)
+                            .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).stroke(colors.cardBorder, lineWidth: 1))
+                            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                            .padding(.horizontal, 12)
+                        }
                     }
                 }
             }
             .padding(.bottom, 18)
         }
-        .refreshable { await app.loadLorong() }
-        .task {
-            if app.lorongItems.isEmpty && app.session != nil {
+        .refreshable {
+            if subMode == 0 {
+                await app.loadAssignedIps(query: ipQuery, reset: true)
+            } else {
                 await app.loadLorong()
             }
         }
+        .task {
+            if app.assignedIps.isEmpty && app.session != nil {
+                await app.loadAssignedIps(query: ipQuery, reset: true)
+            }
+        }
+    }
+}
+
+struct IpFilterChip: View {
+    let title: String
+    let active: Bool
+    let colors: SiapColors
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Text(title)
+                .font(.system(size: 12, weight: .bold))
+                .padding(.horizontal, 12)
+                .padding(.vertical, 7)
+                .background(active ? colors.primaryAction : colors.surface)
+                .foregroundStyle(active ? colors.onPrimaryAction : colors.textSecondary)
+                .overlay(Capsule().stroke(active ? Color.clear : colors.cardBorder, lineWidth: 1))
+                .clipShape(Capsule())
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+// MARK: - Authentic Android AssignedIpCard (Dokumen Sudah Diperiksa + Aju Barcon + Lihat BAP + Kendala)
+
+struct AssignedIpCardView: View {
+    @EnvironmentObject var app: AppState
+    let item: AssignedIpItem
+    let colors: SiapColors
+
+    var body: some View {
+        let pibDoc = item.toPibDocument()
+        let st = colors.statusBadgeStyle(for: item.status)
+        let barconDone = app.isBarconSubmitted(for: pibDoc)
+
+        VStack(spacing: 0) {
+            HStack(spacing: 0) {
+                Rectangle()
+                    .fill(st.accent)
+                    .frame(width: 4.5)
+
+                VStack(alignment: .leading, spacing: 9) {
+                    // Tap header to open full Detail PIB / Lampiran / Foto
+                    Button {
+                        if let existing = app.pibs.first(where: { $0.noPib.filter(\.isNumber) == item.noPib.filter(\.isNumber) }) {
+                            app.openPib(existing)
+                        } else {
+                            app.openPib(pibDoc)
+                        }
+                    } label: {
+                        VStack(alignment: .leading, spacing: 7) {
+                            HStack(alignment: .top, spacing: 8) {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    HStack(spacing: 6) {
+                                        Text("PIB \(item.noPib)")
+                                            .font(.system(size: 16, weight: .heavy, design: .rounded))
+                                            .foregroundStyle(colors.textPrimary)
+
+                                        Text(item.jenisKontainer)
+                                            .font(.system(size: 10, weight: .heavy))
+                                            .padding(.horizontal, 6)
+                                            .padding(.vertical, 2)
+                                            .background(colors.primaryContainer)
+                                            .foregroundStyle(colors.onPrimaryContainer)
+                                            .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+                                    }
+                                    Text(SiapCrypto.formatDisplayDate(item.tglPib))
+                                        .font(.system(size: 11.5, weight: .medium))
+                                        .foregroundStyle(colors.textHint)
+                                }
+                                Spacer(minLength: 4)
+                                SiapStatusChip(text: item.status, colors: colors)
+                            }
+
+                            Text(item.importir)
+                                .font(.system(size: 13.5, weight: .bold))
+                                .foregroundStyle(colors.textPrimary)
+                                .lineLimit(2)
+                                .multilineTextAlignment(.leading)
+
+                            ScrollView(.horizontal, showsIndicators: false) {
+                                HStack(spacing: 6) {
+                                    if !item.tps.isEmpty && item.tps != "-" {
+                                        SiapMetaTag(icon: "building.2.fill", text: "TPS \(item.tps)", bg: colors.surfaceElevated, fg: colors.textSecondary)
+                                    }
+                                    if !item.jumlahKontainer.isEmpty && item.jumlahKontainer != "-" {
+                                        SiapMetaTag(icon: "shippingbox", text: item.jumlahKontainer, bg: colors.surfaceElevated, fg: colors.secondary)
+                                    }
+                                    if !item.waktuIp.isEmpty && item.waktuIp != "-" {
+                                        SiapMetaTag(icon: "clock.fill", text: item.waktuIp, bg: colors.surfaceElevated, fg: colors.textHint)
+                                    }
+                                }
+                            }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .buttonStyle(.plain)
+
+                    Divider().overlay(colors.divider)
+
+                    // Action Buttons Row (Exact Android AssignedIpCard: Aju Barcon | Lihat/Isi BAP | Kendala)
+                    HStack(spacing: 7) {
+                        Button {
+                            app.openBarconForm(for: pibDoc)
+                        } label: {
+                            HStack(spacing: 4) {
+                                Image(systemName: barconDone ? "checkmark.circle.fill" : "shippingbox.fill")
+                                    .font(.system(size: 11.5, weight: .bold))
+                                Text(barconDone ? "Barcon Diajukan" : "Aju Barcon")
+                                    .font(.system(size: 11.5, weight: .bold))
+                                    .lineLimit(1)
+                            }
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 8)
+                            .padding(.horizontal, 8)
+                            .background(barconDone ? colors.success.opacity(0.18) : colors.primaryAction)
+                            .foregroundStyle(barconDone ? colors.success : colors.onPrimaryAction)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                                    .stroke(barconDone ? colors.success.opacity(0.55) : Color.clear, lineWidth: 1)
+                            )
+                            .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+                        }
+                        .buttonStyle(.plain)
+
+                        if item.isSudahBap {
+                            Button {
+                                if let u = URL(string: item.linkCetakBap), !item.linkCetakBap.isEmpty {
+                                    app.activeDokap = DokapTarget(title: "BAP • PIB \(item.noPib)", url: u)
+                                } else {
+                                    Task { await app.openBapForPib(pibDoc) }
+                                }
+                            } label: {
+                                HStack(spacing: 4) {
+                                    Image(systemName: "doc.richtext.fill")
+                                        .font(.system(size: 11.5, weight: .bold))
+                                    Text("Lihat BAP")
+                                        .font(.system(size: 11.5, weight: .bold))
+                                }
+                                .padding(.vertical, 8)
+                                .padding(.horizontal, 10)
+                                .background(colors.primaryContainer)
+                                .foregroundStyle(colors.onPrimaryContainer)
+                                .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+                            }
+                            .buttonStyle(.plain)
+                        } else if !item.linkBuatBap.isEmpty, let u = URL(string: item.linkBuatBap) {
+                            Button {
+                                UIApplication.shared.open(u)
+                            } label: {
+                                HStack(spacing: 4) {
+                                    Image(systemName: "square.and.pencil")
+                                        .font(.system(size: 11.5, weight: .bold))
+                                    Text("Isi BAP")
+                                        .font(.system(size: 11.5, weight: .bold))
+                                }
+                                .padding(.vertical, 8)
+                                .padding(.horizontal, 10)
+                                .background(colors.secondary.opacity(0.18))
+                                .foregroundStyle(colors.secondary)
+                                .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+                            }
+                            .buttonStyle(.plain)
+                        }
+
+                        Button {
+                            app.openKendalaTemuanForm(for: pibDoc)
+                        } label: {
+                            HStack(spacing: 3) {
+                                Image(systemName: "exclamationmark.bubble.fill")
+                                    .font(.system(size: 11, weight: .bold))
+                                Text("Kendala")
+                                    .font(.system(size: 11, weight: .bold))
+                            }
+                            .padding(.vertical, 8)
+                            .padding(.horizontal, 9)
+                            .background(colors.surfaceElevated)
+                            .foregroundStyle(colors.textSecondary)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                                    .stroke(colors.cardBorder, lineWidth: 1)
+                            )
+                            .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(12)
+            }
+        }
+        .background(colors.surface)
+        .overlay(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .stroke(colors.cardBorder, lineWidth: 1)
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .shadow(color: Color.black.opacity(colors.isDark ? 0.22 : 0.05), radius: 5, y: 2)
     }
 }
 
@@ -4198,7 +4601,7 @@ struct UserTabView: View {
                 }
                 .padding(.horizontal, 12)
 
-                Text("SIAP NEO iOS Native v1.19.5 • KPU BC Tipe A Tanjung Priok")
+                Text("SIAP NEO iOS Native v1.19.6 • KPU BC Tipe A Tanjung Priok")
                     .font(.system(size: 11))
                     .foregroundStyle(colors.textHint)
                     .padding(.bottom, 14)

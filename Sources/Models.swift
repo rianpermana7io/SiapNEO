@@ -100,6 +100,63 @@ struct AppUpdateInfo: Equatable {
     let notes: String
 }
 
+/// Exact port of AssignedIpItem from SIAP 3.0 siapfb_pemeriksa/browse_data
+struct AssignedIpItem: Identifiable, Hashable {
+    var id: String { "\(kodeTiket)_\(noPib)_\(hashId)" }
+    let kodeTiket: String
+    let noPib: String
+    let tglPib: String
+    let importir: String
+    let jenisDokumen: String
+    let jenisKontainer: String
+    let jumlahKontainer: String
+    let tps: String
+    let waktuIp: String
+    let status: String
+    let namaPj: String
+    let hpPj: String
+    let namaPfpd: String
+    let hpPfpd: String
+    let atensi: String
+    let hashId: String
+    let linkCetakBap: String
+    let linkBuatBap: String
+
+    var isSudahBap: Bool {
+        let s = status.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return s.contains("sudah bap") || s == "bap" || s.contains("selesai") || !linkCetakBap.isEmpty
+    }
+
+    func toPibDocument() -> PibDocument {
+        PibDocument(
+            kodeTiket: kodeTiket,
+            noPib: noPib,
+            tglPib: tglPib,
+            jenisDokumen: jenisDokumen,
+            importir: importir,
+            kodeTps: tps,
+            jenisKontainer: jenisKontainer,
+            ipCeisa: waktuIp,
+            namaPfpd: namaPfpd,
+            noHpPfpd: hpPfpd,
+            atensi: atensi,
+            namaPj: namaPj,
+            hpPj: hpPj,
+            nomorBap: isSudahBap ? "SUDAH BAP" : "",
+            tglBap: "",
+            persentasePeriksa: "",
+            status: status,
+            jumlahItem: jumlahKontainer,
+            barcon: "",
+            pendampingan: "",
+            bidangPendamping: "",
+            namaPendamping: "",
+            kendala: "",
+            cluster: ""
+        )
+    }
+}
+
 struct ContainerItem: Identifiable, Hashable {
     var id: String { noContainer }
     let noContainer: String

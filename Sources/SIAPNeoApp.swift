@@ -212,7 +212,7 @@ struct SiapTopAppBar: View {
         }
         switch app.activeTab {
         case .beranda: return "SIAP NEO"
-        case .instruksi: return "Instruksi Lorong"
+        case .instruksi: return "Instruksi Pemeriksaan"
         case .browse: return "Browse Dokumen"
         case .tps: return "Monitoring TPS"
         case .akun: return "Profil & Pengaturan"
