@@ -3442,6 +3442,12 @@ struct TtdPjModalSheet: View {
 // MARK: - Native Authenticated Dokap / Lampiran PDF Viewer (Matches Android DocumentViewerKt)
 
 struct DokapViewerPanel: View {
+    private enum DokapSheet: String, Identifiable {
+        case share
+        case print
+        var id: String { rawValue }
+    }
+
     @EnvironmentObject var app: AppState
     let target: DokapTarget
     let colors: SiapColors
@@ -3450,12 +3456,12 @@ struct DokapViewerPanel: View {
     @State private var errorMsg: String?
     @State private var downloaded: SiapApiClient.DownloadedDocument?
     @State private var rotation = 0
-    @State private var showShare = false
+    @State private var activeSheet: DokapSheet?
 
     var body: some View {
         VStack(spacing: 0) {
-            // Document Toolbar (Rotate 90°, Reload, Share/Save PDF)
-            HStack(spacing: 8) {
+            // Document Toolbar (Rotate 90°, Reload, Print BAP, Share/Save PDF)
+            HStack(spacing: 7) {
                 Button {
                     rotation = (rotation + 90) % 360
                 } label: {
@@ -3463,8 +3469,8 @@ struct DokapViewerPanel: View {
                         Image(systemName: "rotate.right")
                         Text("Putar")
                     }
-                    .font(.system(size: 12, weight: .bold))
-                    .padding(.horizontal, 10)
+                    .font(.system(size: 11.5, weight: .bold))
+                    .padding(.horizontal, 9)
                     .padding(.vertical, 6)
                     .background(colors.surfaceElevated)
                     .foregroundStyle(colors.textPrimary)
@@ -3476,24 +3482,38 @@ struct DokapViewerPanel: View {
                 Button {
                     Task { await loadDocument() }
                 } label: {
-                    HStack(spacing: 4) {
-                        Image(systemName: "arrow.clockwise")
-                        Text("Muat Ulang")
-                    }
-                    .font(.system(size: 12, weight: .bold))
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 6)
-                    .background(colors.surfaceElevated)
-                    .foregroundStyle(colors.textPrimary)
-                    .clipShape(Capsule())
+                    Image(systemName: "arrow.clockwise")
+                        .font(.system(size: 12.5, weight: .bold))
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 6)
+                        .background(colors.surfaceElevated)
+                        .foregroundStyle(colors.textPrimary)
+                        .clipShape(Capsule())
                 }
                 .buttonStyle(.plain)
+                .accessibilityLabel("Muat Ulang")
 
                 Spacer()
 
                 if downloaded != nil {
                     Button {
-                        showShare = true
+                        activeSheet = .print
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: "printer.fill")
+                            Text("Cetak")
+                        }
+                        .font(.system(size: 12, weight: .bold))
+                        .padding(.horizontal, 11)
+                        .padding(.vertical, 6)
+                        .background(Color(hex: 0x16A34A))
+                        .foregroundStyle(.white)
+                        .clipShape(Capsule())
+                    }
+                    .buttonStyle(.plain)
+
+                    Button {
+                        activeSheet = .share
                     } label: {
                         HStack(spacing: 4) {
                             Image(systemName: "square.and.arrow.up")
@@ -3574,9 +3594,21 @@ struct DokapViewerPanel: View {
         .task(id: target.id) {
             await loadDocument()
         }
-        .sheet(isPresented: $showShare) {
-            if let url = downloaded?.localURL {
-                SiapShareSheet(items: [url])
+        .sheet(item: $activeSheet) { sheet in
+            if let doc = downloaded {
+                switch sheet {
+                case .share:
+                    SiapShareSheet(items: [doc.localURL])
+                case .print:
+                    BapPrintSheet(
+                        title: target.title,
+                        fileURL: doc.localURL,
+                        isImage: doc.isImage,
+                        colors: colors
+                    )
+                    .environmentObject(app)
+                    .preferredColorScheme(app.themeMode.preferredColorScheme)
+                }
             }
         }
     }
@@ -5354,6 +5386,8 @@ struct UserTabView: View {
     @State private var siap3User = UserDefaults.standard.string(forKey: "siapneo_siap3_user") ?? ""
     @State private var siap3Pass = UserDefaults.standard.string(forKey: "siapneo_siap3_pass") ?? ""
     @State private var isTestingSiap3 = false
+    @State private var showPrinterSettings = false
+    @State private var printerConfig = PrinterConnectionConfig.load()
 
     var body: some View {
         ScrollView {
@@ -5559,6 +5593,64 @@ struct UserTabView: View {
                 .clipShape(RoundedRectangle(cornerRadius: 15, style: .continuous))
                 .padding(.horizontal, 12)
 
+                // Printer BAP (SIAP Print PC & AirPrint — Mirror Android Akun > Printer)
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack {
+                        HStack(spacing: 7) {
+                            Image(systemName: "printer.filled.and.paper")
+                                .font(.system(size: 14, weight: .bold))
+                                .foregroundStyle(SiapColors.brandAmber)
+                            Text("Printer BAP (SIAP Print)")
+                                .font(.system(size: 14.5, weight: .bold))
+                                .foregroundStyle(colors.textPrimary)
+                        }
+                        Spacer()
+                        Text(printerConfig.isConfigured ? "TERKONFIGURASI" : "BELUM DIATUR")
+                            .font(.system(size: 10, weight: .heavy))
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 3)
+                            .background((printerConfig.isConfigured ? colors.success : SiapColors.brandAmber).opacity(0.16))
+                            .foregroundStyle(printerConfig.isConfigured ? colors.success : SiapColors.brandAmber)
+                            .clipShape(Capsule())
+                    }
+
+                    if printerConfig.isConfigured {
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text("Mode: \(printerConfig.mode.label)")
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundStyle(colors.textSecondary)
+                            if let first = printerConfig.candidateBaseUrls().first {
+                                Text("Alamat: \(first.url)")
+                                    .font(.system(size: 11.5, design: .monospaced))
+                                    .foregroundStyle(colors.textHint)
+                            }
+                            if !printerConfig.printerName.isEmpty {
+                                Text("Printer: \(printerConfig.printerName)")
+                                    .font(.system(size: 11.5))
+                                    .foregroundStyle(colors.textHint)
+                            }
+                        }
+                    } else {
+                        Text("Atur server SIAP Print PC (LAN / Tailscale / Funnel port 1234) seperti di SIAP NEO Android untuk cetak BAP langsung, atau gunakan AirPrint iOS saat membuka BAP.")
+                            .font(.system(size: 11.5))
+                            .foregroundStyle(colors.textHint)
+                    }
+
+                    SiapFilledButton(
+                        "Atur Server SIAP Print",
+                        icon: "printer.fill",
+                        bg: colors.primaryAction,
+                        fg: colors.onPrimaryAction
+                    ) {
+                        showPrinterSettings = true
+                    }
+                }
+                .padding(14)
+                .background(colors.surface)
+                .overlay(RoundedRectangle(cornerRadius: 15, style: .continuous).stroke(colors.cardBorder, lineWidth: 1))
+                .clipShape(RoundedRectangle(cornerRadius: 15, style: .continuous))
+                .padding(.horizontal, 12)
+
                 // Pembaruan Otomatis (TrollStore 1-Tap Updater — Mirror Android AppUpdater)
                 VStack(alignment: .leading, spacing: 10) {
                     HStack {
@@ -5695,11 +5787,18 @@ struct UserTabView: View {
                 }
                 .padding(.horizontal, 12)
 
-                Text("SIAP NEO iOS Native v1.19.8 • KPU BC Tipe A Tanjung Priok")
+                Text("SIAP NEO iOS Native v\(app.currentAppVersion) • KPU BC Tipe A Tanjung Priok")
                     .font(.system(size: 11))
                     .foregroundStyle(colors.textHint)
                     .padding(.bottom, 14)
             }
+        }
+        .sheet(isPresented: $showPrinterSettings, onDismiss: {
+            printerConfig = PrinterConnectionConfig.load()
+        }) {
+            PrinterSettingsSheet(colors: colors)
+                .environmentObject(app)
+                .preferredColorScheme(app.themeMode.preferredColorScheme)
         }
         .alert("Keluar Akun?", isPresented: $showLogoutConfirm) {
             Button("Batal", role: .cancel) {}
