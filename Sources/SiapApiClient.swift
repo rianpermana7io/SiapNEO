@@ -901,7 +901,10 @@ final class SiapApiClient {
         let ts = Int(Date().timeIntervalSince1970 * 1000)
         guard let url = URL(string: "\(baseUrl)?_t=\(ts)") else { throw SiapApiError.invalidURL }
 
-        let (data, _) = try await session.data(from: url)
+        var req = URLRequest(url: url)
+        req.setValue(desktopUserAgent, forHTTPHeaderField: "User-Agent")
+        let targetSession = (source == .tpsl) ? siap3Session : session
+        let (data, _) = try await targetSession.data(for: req)
         let html = String(data: data, encoding: .utf8) ?? String(data: data, encoding: .isoLatin1) ?? ""
         return parseHtmlTableRows(html: html, source: source.rawValue, myPibs: myPibs, myContainers: myContainers)
     }
@@ -920,7 +923,8 @@ final class SiapApiClient {
         guard let trRegex = try? NSRegularExpression(pattern: "<tr[^>]*>(.*?)</tr>", options: [.caseInsensitive, .dotMatchesLineSeparators]),
               let tdRegex = try? NSRegularExpression(pattern: "<td[^>]*>(.*?)</td>", options: [.caseInsensitive, .dotMatchesLineSeparators]),
               let contRegex = try? NSRegularExpression(pattern: "\\b([A-Z]{4}\\d{7})\\b"),
-              let pibRegex = try? NSRegularExpression(pattern: "\\b(\\d{6})\\b") else {
+              let exactPibCellRegex = try? NSRegularExpression(pattern: "^0*\\d{5,6}$"),
+              let pibInTextRegex = try? NSRegularExpression(pattern: "(?<![\\d:-])(\\d{6})(?![\\d:-])") else {
             return []
         }
 
@@ -929,8 +933,9 @@ final class SiapApiClient {
         var out: [TpsMonitorItem] = []
 
         for m in trMatches {
-            if out.count >= 200 { break }
+            if out.count >= 600 { break }
             let rowHtml = nsHtml.substring(with: m.range(at: 1))
+            if rowHtml.lowercased().contains("datatables_empty") || rowHtml.lowercased().contains("<th") { continue }
             let nsRow = rowHtml as NSString
             let tdMatches = tdRegex.matches(in: rowHtml, range: NSRange(location: 0, length: nsRow.length))
             if tdMatches.count < 3 { continue }
@@ -943,15 +948,31 @@ final class SiapApiClient {
             if let cm = contRegex.firstMatch(in: upper as String, range: NSRange(location: 0, length: upper.length)) {
                 cont = upper.substring(with: cm.range(at: 1))
             }
+
+            // Prefer exact 5-6 digit PIB cell (skipping container & date/time cells), fallback to regex
             var pib = ""
-            if let pm = pibRegex.firstMatch(in: joined, range: NSRange(location: 0, length: (joined as NSString).length)) {
-                pib = (joined as NSString).substring(with: pm.range(at: 1))
+            for cell in cells {
+                let cTrim = cell.trimmingCharacters(in: .whitespacesAndNewlines)
+                if exactPibCellRegex.firstMatch(in: cTrim, range: NSRange(location: 0, length: (cTrim as NSString).length)) != nil {
+                    pib = cTrim
+                    break
+                }
             }
+            if pib.isEmpty {
+                let scrubbed = cont.isEmpty ? joined : joined.replacingOccurrences(of: cont, with: "")
+                if let pm = pibInTextRegex.firstMatch(in: scrubbed, range: NSRange(location: 0, length: (scrubbed as NSString).length)) {
+                    pib = (scrubbed as NSString).substring(with: pm.range(at: 1))
+                }
+            }
+
             let normPib = String(pib.drop(while: { $0 == "0" }))
             let isMine = (!normPib.isEmpty && myPibs.contains(normPib))
                 || (!cont.isEmpty && myContainers.contains(cont.uppercased()))
 
-            let importir = cells.first(where: { $0.uppercased().hasPrefix("PT") || $0.uppercased().hasPrefix("CV") }) ?? ""
+            let importir = cells.first(where: {
+                let u = $0.uppercased()
+                return u.hasPrefix("PT") || u.hasPrefix("CV") || u.hasPrefix("UD") || u.hasPrefix("PD") || u.hasPrefix("FA") || u.hasPrefix("YAYASAN")
+            }) ?? ""
             let status = cells.last ?? source
 
             out.append(TpsMonitorItem(
@@ -960,7 +981,7 @@ final class SiapApiClient {
                 pib: pib,
                 importir: importir,
                 status: status,
-                summary: cells.prefix(6).joined(separator: " • "),
+                summary: cells.prefix(8).joined(separator: " • "),
                 isMyTask: isMine
             ))
         }

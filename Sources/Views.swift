@@ -28,6 +28,9 @@ final class AppState: ObservableObject {
     @Published var activeUploadContext: UploadFotoContext?
     @Published var activeDokap: DokapTarget?
     @Published var showManualSheet = false
+    @Published var pendingBrowseQuery: String?
+    @Published var pendingBrowseAutoExpand = false
+    @Published var browseReturnToTps = false
 
     // Theme & UI Density (Matches Android ThemeState)
     @Published var themeMode: SiapThemeMode {
@@ -80,6 +83,40 @@ final class AppState: ObservableObject {
 
     func openUpload(pib: PibDocument, nokon: String, containers: [ContainerItem]) {
         activeUploadContext = UploadFotoContext(pib: pib, nokon: nokon, containers: containers)
+    }
+
+    /// Exact port of Android HomeViewModel.openPibByNumber + searchPibInBrowse from Monitoring TPS
+    func openPibFromTps(noPib: String, fallbackQuery: String) {
+        let digits = noPib.filter(\.isNumber)
+        let normTarget = String(digits.drop(while: { $0 == "0" }))
+        if !digits.isEmpty {
+            if let existing = pibs.first(where: { doc in
+                let d = doc.noPib.filter(\.isNumber)
+                let nd = String(d.drop(while: { $0 == "0" }))
+                return d == digits || (!normTarget.isEmpty && nd == normTarget)
+            }) {
+                openPib(existing)
+                return
+            }
+        }
+        let query = !digits.isEmpty ? digits : fallbackQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else {
+            showToast("Nomor PIB tidak tersedia untuk baris ini")
+            return
+        }
+        searchPibInBrowse(query: query, fromTps: true)
+    }
+
+    func searchPibInBrowse(query: String, fromTps: Bool = true) {
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        selectedPib = nil
+        activeUploadContext = nil
+        activeDokap = nil
+        browseReturnToTps = fromTps
+        pendingBrowseAutoExpand = true
+        pendingBrowseQuery = trimmed
+        activeTab = .browse
     }
 
     func saveSession(_ s: UserSession) {
@@ -183,7 +220,7 @@ struct LoginView: View {
                             .font(.system(size: 13.5, weight: .medium))
                             .foregroundStyle(SiapColors.hintOnNavy)
 
-                        Text("Sistem Informasi Pemeriksaan Fisik • v1.19.3")
+                        Text("Sistem Informasi Pemeriksaan Fisik • v1.19.4")
                             .font(.system(size: 11, weight: .bold))
                             .padding(.horizontal, 12)
                             .padding(.vertical, 5)
@@ -2494,18 +2531,52 @@ struct BrowseTabView: View {
     var body: some View {
         ScrollView {
             VStack(spacing: 12) {
+                // Return-to-TPS Banner when launched from Monitoring TPS
+                if app.browseReturnToTps {
+                    HStack(spacing: 8) {
+                        Button {
+                            app.browseReturnToTps = false
+                            app.activeTab = .tps
+                        } label: {
+                            HStack(spacing: 5) {
+                                Image(systemName: "chevron.left")
+                                Text("Kembali ke Monitoring TPS")
+                            }
+                            .font(.system(size: 12.5, weight: .bold))
+                            .foregroundStyle(colors.onPrimaryContainer)
+                        }
+                        .buttonStyle(.plain)
+                        Spacer()
+                        Button {
+                            app.browseReturnToTps = false
+                        } label: {
+                            Image(systemName: "xmark")
+                                .font(.system(size: 11, weight: .bold))
+                                .foregroundStyle(colors.textHint)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 9)
+                    .background(colors.primaryContainer)
+                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    .padding(.horizontal, 12)
+                    .padding(.top, 10)
+                }
+
                 // Segmented Pill Switcher
                 HStack(spacing: 6) {
                     BrowseSegmentPill(title: "Pendok MK (Lampiran)", active: mode == 0, colors: colors) {
                         mode = 0
-                        if pendokResults.isEmpty { Task { await search() } }
+                        if pendokResults.isEmpty || !query.isEmpty { Task { await search() } }
                     }
                     BrowseSegmentPill(title: "Browse PIB", active: mode == 1, colors: colors) {
                         mode = 1
+                        if !query.isEmpty { Task { await search() } }
                     }
                 }
                 .padding(.horizontal, 12)
-                .padding(.top, 10)
+                .padding(.top, app.browseReturnToTps ? 2 : 10)
 
                 // Search Row
                 HStack(spacing: 8) {
@@ -2638,13 +2709,29 @@ struct BrowseTabView: View {
             .padding(.bottom, 18)
         }
         .task {
-            if mode == 0 && pendokResults.isEmpty && app.session != nil {
+            if let pending = app.pendingBrowseQuery, !pending.isEmpty {
+                let autoExpand = app.pendingBrowseAutoExpand
+                app.pendingBrowseQuery = nil
+                app.pendingBrowseAutoExpand = false
+                mode = 0
+                query = pending
+                await search(autoExpandFirst: autoExpand)
+            } else if mode == 0 && pendokResults.isEmpty && app.session != nil {
                 await search()
             }
         }
+        .onChange(of: app.pendingBrowseQuery) { newVal in
+            guard let pending = newVal, !pending.isEmpty else { return }
+            let autoExpand = app.pendingBrowseAutoExpand
+            app.pendingBrowseQuery = nil
+            app.pendingBrowseAutoExpand = false
+            mode = 0
+            query = pending
+            Task { await search(autoExpandFirst: autoExpand) }
+        }
     }
 
-    private func search() async {
+    private func search(autoExpandFirst: Bool = false) async {
         guard let sess = app.session else { return }
         isLoading = true
         errorMsg = nil
@@ -2652,7 +2739,7 @@ struct BrowseTabView: View {
         let q = query.trimmingCharacters(in: .whitespacesAndNewlines)
         do {
             if mode == 0 {
-                pendokResults = try await SiapApiClient.shared.browsePendok(
+                let results = try await SiapApiClient.shared.browsePendok(
                     username: sess.username,
                     password: sess.password,
                     fallbackEmail: sess.usernameEmail,
@@ -2660,6 +2747,11 @@ struct BrowseTabView: View {
                     start: 0,
                     length: 30
                 )
+                pendokResults = results
+                if autoExpandFirst, let first = results.first {
+                    expandedActionId = first.actionId
+                    await loadAttachments(for: first)
+                }
             } else {
                 pibResults = try await SiapApiClient.shared.browsePibData(nip: sess.nip, noPib: q)
             }
@@ -2866,6 +2958,7 @@ struct TpsTabView: View {
     @State private var isLoading = false
     @State private var onlyMyTasks = false
     @State private var searchText = ""
+    @State private var lampiranSheetItem: TpsMonitorItem?
 
     private var myTaskCount: Int { items.filter(\.isMyTask).count }
 
@@ -2975,39 +3068,94 @@ struct TpsTabView: View {
                             .padding(.top, 36)
                     } else {
                         ForEach(filtered) { item in
-                            VStack(alignment: .leading, spacing: 6) {
-                                HStack {
-                                    if item.isMyTask {
-                                        Image(systemName: "star.fill")
-                                            .font(.system(size: 12))
-                                            .foregroundStyle(SiapColors.brandAmber)
+                            let browseTarget = !item.pib.isEmpty ? item.pib : (!item.importir.isEmpty ? item.importir : item.container)
+                            let browseLabel = !item.pib.isEmpty ? "Cari PIB \(item.pib) di Browse" : "Cari di Browse"
+
+                            VStack(alignment: .leading, spacing: 8) {
+                                Button {
+                                    app.openPibFromTps(noPib: item.pib, fallbackQuery: browseTarget)
+                                } label: {
+                                    VStack(alignment: .leading, spacing: 6) {
+                                        HStack {
+                                            if item.isMyTask {
+                                                Image(systemName: "star.fill")
+                                                    .font(.system(size: 12))
+                                                    .foregroundStyle(SiapColors.brandAmber)
+                                            }
+                                            Text(item.container)
+                                                .font(.system(size: 14.5, weight: .heavy, design: .monospaced))
+                                                .foregroundStyle(item.isMyTask ? colors.myTaskText : colors.textPrimary)
+                                            Spacer()
+                                            if !item.pib.isEmpty {
+                                                Text("PIB \(item.pib)")
+                                                    .font(.system(size: 11.5, weight: .bold, design: .monospaced))
+                                                    .padding(.horizontal, 7)
+                                                    .padding(.vertical, 3)
+                                                    .background(colors.primaryContainer)
+                                                    .foregroundStyle(colors.onPrimaryContainer)
+                                                    .clipShape(Capsule())
+                                            }
+                                        }
+
+                                        if !item.importir.isEmpty {
+                                            Text(item.importir)
+                                                .font(.system(size: 12.5, weight: .bold))
+                                                .foregroundStyle(colors.textPrimary)
+                                                .lineLimit(1)
+                                        }
+
+                                        Text(item.summary)
+                                            .font(.system(size: 11.5))
+                                            .foregroundStyle(colors.textSecondary)
+                                            .lineLimit(2)
+                                            .multilineTextAlignment(.leading)
                                     }
-                                    Text(item.container)
-                                        .font(.system(size: 14.5, weight: .heavy, design: .monospaced))
-                                        .foregroundStyle(item.isMyTask ? colors.myTaskText : colors.textPrimary)
-                                    Spacer()
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                }
+                                .buttonStyle(.plain)
+
+                                Divider().overlay(colors.divider)
+
+                                // Action Row: Cari PIB di Browse + Lampiran PDF (Exact Android RowSearchButton + Quick Lampiran!)
+                                HStack(spacing: 8) {
+                                    Button {
+                                        app.searchPibInBrowse(query: browseTarget, fromTps: true)
+                                    } label: {
+                                        HStack(spacing: 5) {
+                                            Image(systemName: "doc.text.magnifyingglass")
+                                                .font(.system(size: 11.5, weight: .bold))
+                                            Text(browseLabel)
+                                                .font(.system(size: 11.5, weight: .bold))
+                                                .lineLimit(1)
+                                        }
+                                        .frame(maxWidth: .infinity)
+                                        .padding(.vertical, 8)
+                                        .padding(.horizontal, 9)
+                                        .background(colors.primaryContainer)
+                                        .foregroundStyle(colors.onPrimaryContainer)
+                                        .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+                                    }
+                                    .buttonStyle(.plain)
+
                                     if !item.pib.isEmpty {
-                                        Text("PIB \(item.pib)")
-                                            .font(.system(size: 11.5, weight: .bold, design: .monospaced))
-                                            .padding(.horizontal, 7)
-                                            .padding(.vertical, 3)
-                                            .background(colors.primaryContainer)
-                                            .foregroundStyle(colors.onPrimaryContainer)
-                                            .clipShape(Capsule())
+                                        Button {
+                                            lampiranSheetItem = item
+                                        } label: {
+                                            HStack(spacing: 4) {
+                                                Image(systemName: "paperclip")
+                                                    .font(.system(size: 11.5, weight: .bold))
+                                                Text("Lampiran")
+                                                    .font(.system(size: 11.5, weight: .bold))
+                                            }
+                                            .padding(.vertical, 8)
+                                            .padding(.horizontal, 11)
+                                            .background(colors.primaryAction)
+                                            .foregroundStyle(colors.onPrimaryAction)
+                                            .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+                                        }
+                                        .buttonStyle(.plain)
                                     }
                                 }
-
-                                if !item.importir.isEmpty {
-                                    Text(item.importir)
-                                        .font(.system(size: 12.5, weight: .bold))
-                                        .foregroundStyle(colors.textPrimary)
-                                        .lineLimit(1)
-                                }
-
-                                Text(item.summary)
-                                    .font(.system(size: 11.5))
-                                    .foregroundStyle(colors.textSecondary)
-                                    .lineLimit(2)
                             }
                             .padding(12)
                             .background(item.isMyTask ? colors.myTaskBg : colors.surface)
@@ -3026,6 +3174,11 @@ struct TpsTabView: View {
         }
         .onChange(of: source) { _ in Task { await load() } }
         .task { await load() }
+        .sheet(item: $lampiranSheetItem) { item in
+            TpsDocumentLampiranSheet(item: item, colors: colors)
+                .environmentObject(app)
+                .preferredColorScheme(app.themeMode.preferredColorScheme)
+        }
     }
 
     private func load() async {
@@ -3037,6 +3190,253 @@ struct TpsTabView: View {
             items = try await SiapApiClient.shared.fetchTps(source: source, myPibs: myPibs, myContainers: myConts)
         } catch {
             app.showToast("Gagal memuat \(source.rawValue): \(error.localizedDescription)")
+        }
+    }
+}
+
+// MARK: - In-Place Lampiran & Detail Sheet for Any TPS Monitoring Document
+
+struct TpsDocumentLampiranSheet: View {
+    @EnvironmentObject var app: AppState
+    @Environment(\.dismiss) private var dismiss
+    let item: TpsMonitorItem
+    let colors: SiapColors
+
+    @State private var isLoading = true
+    @State private var errorMsg: String?
+    @State private var pendokMatches: [PendokBrowseItem] = []
+    @State private var attachments: [PendokDocumentAttachment] = []
+    @State private var bapUrl: String?
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Dokumen PIB \(item.pib)")
+                        .font(.system(size: 16, weight: .bold))
+                        .foregroundStyle(.white)
+                    Text("\(item.source) • \(item.container)")
+                        .font(.system(size: 12, design: .monospaced))
+                        .foregroundStyle(SiapColors.hintOnNavy)
+                }
+                Spacer()
+                Button {
+                    dismiss()
+                } label: {
+                    Text("Tutup")
+                        .font(.system(size: 13, weight: .bold))
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                        .background(Color.white.opacity(0.16))
+                        .foregroundStyle(.white)
+                        .clipShape(Capsule())
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(16)
+            .background(colors.headerGradient)
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 12) {
+                    if isLoading {
+                        VStack(spacing: 12) {
+                            ProgressView().tint(colors.primaryAction).scaleEffect(1.1)
+                            Text("Mengambil data Pendok MK & Lampiran PDF untuk PIB \(item.pib)...")
+                                .font(.system(size: 13))
+                                .foregroundStyle(colors.textSecondary)
+                                .multilineTextAlignment(.center)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 40)
+                    } else {
+                        if let errorMsg {
+                            HStack(spacing: 8) {
+                                Image(systemName: "exclamationmark.triangle.fill")
+                                Text(errorMsg).font(.system(size: 12.5))
+                            }
+                            .foregroundStyle(colors.danger)
+                            .padding(12)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(colors.danger.opacity(0.14))
+                            .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
+                        }
+
+                        if let info = pendokMatches.first {
+                            VStack(alignment: .leading, spacing: 7) {
+                                HStack {
+                                    Text("Info Pendok MK (SIAP 3.0)")
+                                        .font(.system(size: 13.5, weight: .bold))
+                                        .foregroundStyle(colors.textPrimary)
+                                    Spacer()
+                                    SiapStatusChip(text: info.status, colors: colors)
+                                }
+                                SiapMetaRow(label: "No. / Tgl PIB", value: "\(info.noPib) / \(info.tglPib)", colors: colors)
+                                SiapMetaRow(label: "Importir", value: info.namaImportir, colors: colors)
+                                if !info.pfpd.isEmpty {
+                                    SiapMetaRow(label: "PFPD", value: info.pfpd, colors: colors)
+                                }
+                                if !info.jalur.isEmpty {
+                                    SiapMetaRow(label: "Jalur", value: info.jalur, colors: colors)
+                                }
+                                if !info.actionId.isEmpty {
+                                    SiapMetaRow(label: "Kode Layanan", value: info.actionId, colors: colors)
+                                }
+                            }
+                            .padding(13)
+                            .background(colors.surface)
+                            .overlay(RoundedRectangle(cornerRadius: 13, style: .continuous).stroke(colors.cardBorder, lineWidth: 1))
+                            .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
+                        }
+
+                        // Lampiran Dokumen List
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("Lampiran Dokumen (\(attachments.count + (bapUrl != nil ? 1 : 0)))")
+                                .font(.system(size: 14, weight: .bold))
+                                .foregroundStyle(colors.textPrimary)
+
+                            if attachments.isEmpty && bapUrl == nil {
+                                Text("Belum ada file lampiran PDF ditemukan di SIAP 3.0 untuk PIB \(item.pib).")
+                                    .font(.system(size: 13))
+                                    .foregroundStyle(colors.textHint)
+                                    .padding(14)
+                                    .frame(maxWidth: .infinity)
+                                    .background(colors.surface)
+                                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                            } else {
+                                ForEach(attachments) { att in
+                                    Button {
+                                        if let u = URL(string: att.fileUrl) {
+                                            dismiss()
+                                            app.activeDokap = DokapTarget(title: "\(att.namaDokumen) • PIB \(item.pib)", url: u)
+                                        }
+                                    } label: {
+                                        HStack(spacing: 10) {
+                                            Image(systemName: "doc.richtext.fill")
+                                                .font(.system(size: 18))
+                                                .foregroundStyle(colors.primaryAction)
+                                                .frame(width: 34, height: 34)
+                                                .background(colors.primaryContainer)
+                                                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                                            VStack(alignment: .leading, spacing: 2) {
+                                                Text(att.namaDokumen)
+                                                    .font(.system(size: 13, weight: .bold))
+                                                    .foregroundStyle(colors.textPrimary)
+                                                    .lineLimit(2)
+                                                Text(att.tglUpload.isEmpty ? att.jenisDokumen : "\(att.jenisDokumen) • \(att.tglUpload)")
+                                                    .font(.system(size: 11))
+                                                    .foregroundStyle(colors.textHint)
+                                            }
+                                            Spacer()
+                                            Text("Buka PDF")
+                                                .font(.system(size: 11.5, weight: .bold))
+                                                .padding(.horizontal, 10)
+                                                .padding(.vertical, 6)
+                                                .background(colors.primaryAction)
+                                                .foregroundStyle(colors.onPrimaryAction)
+                                                .clipShape(Capsule())
+                                        }
+                                        .padding(11)
+                                        .background(colors.surface)
+                                        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).stroke(colors.cardBorder, lineWidth: 1))
+                                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                                    }
+                                    .buttonStyle(.plain)
+                                }
+
+                                if let bap = bapUrl, let u = URL(string: bap) {
+                                    Button {
+                                        dismiss()
+                                        app.activeDokap = DokapTarget(title: "BAP • PIB \(item.pib)", url: u)
+                                    } label: {
+                                        HStack(spacing: 10) {
+                                            Image(systemName: "checkmark.seal.fill")
+                                                .font(.system(size: 18))
+                                                .foregroundStyle(colors.success)
+                                                .frame(width: 34, height: 34)
+                                                .background(colors.success.opacity(0.16))
+                                                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                                            VStack(alignment: .leading, spacing: 2) {
+                                                Text("Berita Acara Pemeriksaan (BAP)")
+                                                    .font(.system(size: 13, weight: .bold))
+                                                    .foregroundStyle(colors.textPrimary)
+                                                Text("Cetak BAP SIAP 3.0")
+                                                    .font(.system(size: 11))
+                                                    .foregroundStyle(colors.textHint)
+                                            }
+                                            Spacer()
+                                            Text("Buka PDF")
+                                                .font(.system(size: 11.5, weight: .bold))
+                                                .padding(.horizontal, 10)
+                                                .padding(.vertical, 6)
+                                                .background(colors.success)
+                                                .foregroundStyle(colors.isDark ? Color(hex: 0x052E16) : .white)
+                                                .clipShape(Capsule())
+                                        }
+                                        .padding(11)
+                                        .background(colors.surface)
+                                        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).stroke(colors.cardBorder, lineWidth: 1))
+                                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                                    }
+                                    .buttonStyle(.plain)
+                                }
+                            }
+                        }
+
+                        SiapOutlinedButton("Buka Lengkap di Tab Browse", icon: "doc.text.magnifyingglass", color: colors.secondary, bg: colors.surface) {
+                            dismiss()
+                            app.searchPibInBrowse(query: item.pib, fromTps: true)
+                        }
+                        .padding(.top, 4)
+                    }
+                }
+                .padding(14)
+            }
+            .background(colors.backdrop)
+        }
+        .task {
+            await loadLampiran()
+        }
+    }
+
+    private func loadLampiran() async {
+        guard let sess = app.session else { return }
+        isLoading = true
+        errorMsg = nil
+        defer { isLoading = false }
+        let digits = item.pib.filter(\.isNumber)
+        do {
+            let found = try await SiapApiClient.shared.browsePendok(
+                username: sess.username,
+                password: sess.password,
+                fallbackEmail: sess.usernameEmail,
+                query: digits.isEmpty ? item.pib : digits,
+                start: 0,
+                length: 15
+            )
+            pendokMatches = found
+            let normTarget = String(digits.drop(while: { $0 == "0" }))
+            let best = found.first(where: {
+                let d = $0.noPib.filter(\.isNumber)
+                let nd = String(d.drop(while: { $0 == "0" }))
+                return d == digits || (!normTarget.isEmpty && nd == normTarget)
+            }) ?? found.first
+
+            if let kode = best?.actionId, !kode.isEmpty {
+                attachments = try await SiapApiClient.shared.fetchPendokAttachments(
+                    username: sess.username,
+                    password: sess.password,
+                    fallbackEmail: sess.usernameEmail,
+                    kodePelayanan: kode
+                )
+            }
+            bapUrl = try? await SiapApiClient.shared.fetchBapUrlForPib(
+                username: sess.username,
+                password: sess.password,
+                fallbackEmail: sess.usernameEmail,
+                noPib: item.pib
+            )
+        } catch {
+            errorMsg = error.localizedDescription
         }
     }
 }
@@ -3315,7 +3715,7 @@ struct UserTabView: View {
                 }
                 .padding(.horizontal, 12)
 
-                Text("SIAP NEO iOS Native v1.19.3 • KPU BC Tipe A Tanjung Priok")
+                Text("SIAP NEO iOS Native v1.19.4 • KPU BC Tipe A Tanjung Priok")
                     .font(.system(size: 11))
                     .foregroundStyle(colors.textHint)
                     .padding(.bottom, 14)
