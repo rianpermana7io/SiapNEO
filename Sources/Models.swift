@@ -288,3 +288,66 @@ enum HomeStatusFilter: String, CaseIterable, Identifiable {
 
     var id: String { rawValue }
 }
+
+// MARK: - Redist & Hold Models (1:1 Port of Android RedistHoldTableParser & RedistFormSchema)
+
+struct RedistHistoryItem: Identifiable, Hashable {
+    var id: String { "\(kodeTiket)_\(noPib)_\(tanggalPengajuan)_\(status)" }
+    let kodeTiket: String
+    let importir: String
+    let noPib: String
+    let tglPib: String
+    let tps: String
+    let cluster: String
+    let alasan: String
+    let tanggalPengajuan: String
+    let status: String
+}
+
+struct HoldHistoryItem: Identifiable, Hashable {
+    var id: String { "\(tanggalPengajuan)_\(cluster)_\(waktuMulai)_\(waktuSelesai)_\(status)" }
+    let tanggalPengajuan: String
+    let cluster: String
+    let alasan: String
+    let waktuMulai: String
+    let waktuSelesai: String
+    let status: String
+}
+
+struct SiapSelectOption: Identifiable, Hashable {
+    var id: String { value }
+    let value: String
+    let label: String
+}
+
+struct RedistHoldFormSchema: Equatable {
+    let clusters: [SiapSelectOption]
+    let alasanOptions: [SiapSelectOption]
+
+    static let defaultClusters: [SiapSelectOption] = [
+        SiapSelectOption(value: "GSRA", label: "GRAHA"),
+        SiapSelectOption(value: "NCT1", label: "NPCT1"),
+        SiapSelectOption(value: "ZONA1", label: "ZONA1"),
+        SiapSelectOption(value: "ZONA2", label: "ZONA2"),
+        SiapSelectOption(value: "ZONA3", label: "ZONA3"),
+        SiapSelectOption(value: "JI", label: "JOINT INSPECTION"),
+        SiapSelectOption(value: "LCL", label: "LCL")
+    ]
+
+    static let defaultRedistAlasan: [SiapSelectOption] = [
+        SiapSelectOption(value: "Off", label: "Off"),
+        SiapSelectOption(value: "Periksa Mendalam >1 Dokumen", label: "Periksa Mendalam >1 Dokumen"),
+        SiapSelectOption(value: "Cuti", label: "Cuti"),
+        SiapSelectOption(value: "Izin", label: "Izin"),
+        SiapSelectOption(value: "ST", label: "ST")
+    ]
+
+    static let defaultHoldAlasan: [SiapSelectOption] = [
+        SiapSelectOption(value: "Off", label: "Off"),
+        SiapSelectOption(value: "Periksa Mendalam", label: "Periksa Mendalam"),
+        SiapSelectOption(value: "Cuti", label: "Cuti"),
+        SiapSelectOption(value: "Izin", label: "Izin"),
+        SiapSelectOption(value: "ST", label: "ST"),
+        SiapSelectOption(value: "Menyelesaikan Dokumen", label: "Menyelesaikan Tanggungan Dokumen")
+    ]
+}

@@ -46,6 +46,10 @@ final class AppState: ObservableObject {
     @Published var activeUploadContext: UploadFotoContext?
     @Published var activeDokap: DokapTarget?
     @Published var showManualSheet = false
+    @Published var showRedistSheet = false
+    @Published var showHoldSheet = false
+    @Published var redistHistory: [RedistHistoryItem] = []
+    @Published var holdHistory: [HoldHistoryItem] = []
     @Published var pendingBrowseQuery: String?
     @Published var pendingBrowseAutoExpand = false
     @Published var browseReturnToTps = false
@@ -314,6 +318,10 @@ final class AppState: ObservableObject {
         self.assignedIpHasMore = false
         self.assignedIpError = nil
         self.lorongItems = []
+        self.redistHistory = []
+        self.holdHistory = []
+        self.showRedistSheet = false
+        self.showHoldSheet = false
         self.selectedPib = nil
         self.activeUploadContext = nil
         self.activeDokap = nil
@@ -447,7 +455,7 @@ struct LoginView: View {
                             .font(.system(size: 13.5, weight: .medium))
                             .foregroundStyle(SiapColors.hintOnNavy)
 
-                        Text("Sistem Informasi Pemeriksaan Fisik • v1.19.7")
+                        Text("Sistem Informasi Pemeriksaan Fisik • v1.19.8")
                             .font(.system(size: 11, weight: .bold))
                             .padding(.horizontal, 12)
                             .padding(.vertical, 5)
@@ -714,6 +722,52 @@ struct HomeDashboardView: View {
                     .buttonStyle(.plain)
                 }
                 .padding(.horizontal, 14)
+
+                // Authentic Android Redist & Hold Quick Action Row
+                HStack(spacing: 10) {
+                    Button {
+                        app.showRedistSheet = true
+                    } label: {
+                        HStack(spacing: 6) {
+                            Image(systemName: "arrow.left.arrow.right")
+                                .font(.system(size: 13, weight: .bold))
+                            Text("Redist")
+                                .font(.system(size: 13.5, weight: .bold))
+                        }
+                        .foregroundStyle(SiapColors.brandAmber)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 11)
+                        .background(colors.isDark ? Color(hex: 0x132231) : colors.surface)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                .stroke(SiapColors.brandAmber.opacity(colors.isDark ? 0.85 : 0.9), lineWidth: 1.3)
+                        )
+                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    }
+                    .buttonStyle(.plain)
+
+                    Button {
+                        app.showHoldSheet = true
+                    } label: {
+                        HStack(spacing: 6) {
+                            Image(systemName: "pause.circle.fill")
+                                .font(.system(size: 14, weight: .bold))
+                            Text("Hold")
+                                .font(.system(size: 13.5, weight: .bold))
+                        }
+                        .foregroundStyle(SiapColors.brandSky)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 11)
+                        .background(colors.isDark ? Color(hex: 0x132231) : colors.surface)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                .stroke(SiapColors.brandSky.opacity(colors.isDark ? 0.85 : 0.9), lineWidth: 1.3)
+                        )
+                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    }
+                    .buttonStyle(.plain)
+                }
+                .padding(.horizontal, 12)
 
                 // Search Bar
                 HStack(spacing: 8) {
@@ -4701,7 +4755,7 @@ struct UserTabView: View {
                 }
                 .padding(.horizontal, 12)
 
-                Text("SIAP NEO iOS Native v1.19.7 • KPU BC Tipe A Tanjung Priok")
+                Text("SIAP NEO iOS Native v1.19.8 • KPU BC Tipe A Tanjung Priok")
                     .font(.system(size: 11))
                     .foregroundStyle(colors.textHint)
                     .padding(.bottom, 14)
@@ -4911,6 +4965,822 @@ struct UpdatePromptSheet: View {
                     }
                 }
             }
+        }
+    }
+}
+
+// MARK: - Authentic Android Redist Sheet (Daftar Redist + Ajukan Redist)
+
+struct RedistSheetView: View {
+    @EnvironmentObject var app: AppState
+    @Environment(\.dismiss) private var dismiss
+    let colors: SiapColors
+
+    @State private var showForm = false
+    @State private var isLoading = false
+    @State private var errorMsg: String?
+
+    // Form state
+    @State private var schema = RedistHoldFormSchema(
+        clusters: RedistHoldFormSchema.defaultClusters,
+        alasanOptions: RedistHoldFormSchema.defaultRedistAlasan
+    )
+    @State private var kodeTiket = ""
+    @State private var selectedCluster = "GSRA"
+    @State private var selectedAlasan = "Off"
+    @State private var keterangan = ""
+    @State private var pickedImage: UIImage?
+    @State private var showCameraPicker = false
+    @State private var showGalleryPicker = false
+    @State private var isSubmitting = false
+    @State private var formError: String?
+
+    var body: some View {
+        NavigationView {
+            VStack(spacing: 0) {
+                // Mode Switcher Pill (Riwayat Redist | Ajukan Redist)
+                HStack(spacing: 8) {
+                    Button {
+                        showForm = false
+                    } label: {
+                        Text("Riwayat Redist (\(app.redistHistory.count))")
+                            .font(.system(size: 13, weight: .bold))
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 9)
+                            .background(!showForm ? SiapColors.brandAmber : colors.surfaceElevated)
+                            .foregroundStyle(!showForm ? Color(hex: 0x0B131D) : colors.textSecondary)
+                            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    }
+                    .buttonStyle(.plain)
+
+                    Button {
+                        showForm = true
+                        Task { await loadSchema() }
+                    } label: {
+                        HStack(spacing: 5) {
+                            Image(systemName: "plus.circle.fill")
+                            Text("Ajukan Redist")
+                        }
+                        .font(.system(size: 13, weight: .bold))
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 9)
+                        .background(showForm ? SiapColors.brandAmber : colors.surfaceElevated)
+                        .foregroundStyle(showForm ? Color(hex: 0x0B131D) : colors.textSecondary)
+                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    }
+                    .buttonStyle(.plain)
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
+                .background(colors.surface)
+
+                if showForm {
+                    redistFormContent
+                } else {
+                    redistHistoryContent
+                }
+            }
+            .background(colors.backdrop.ignoresSafeArea())
+            .navigationTitle("Redistribusi (Redist)")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Tutup") { dismiss() }
+                }
+                if !showForm {
+                    ToolbarItem(placement: .primaryAction) {
+                        Button {
+                            Task { await loadHistory() }
+                        } label: {
+                            Image(systemName: "arrow.clockwise")
+                        }
+                        .disabled(isLoading)
+                    }
+                }
+            }
+            .sheet(isPresented: $showCameraPicker) {
+                ImagePicker(sourceType: .camera) { img in pickedImage = img }
+            }
+            .sheet(isPresented: $showGalleryPicker) {
+                ImagePicker(sourceType: .photoLibrary) { img in pickedImage = img }
+            }
+            .task {
+                if app.redistHistory.isEmpty {
+                    await loadHistory()
+                }
+                await loadSchema()
+            }
+        }
+    }
+
+    private var redistHistoryContent: some View {
+        ScrollView {
+            LazyVStack(spacing: 10) {
+                if isLoading {
+                    ProgressView("Memuat riwayat Redist...")
+                        .padding(.top, 40)
+                } else if let err = errorMsg {
+                    VStack(spacing: 10) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .font(.system(size: 28))
+                            .foregroundStyle(colors.warning)
+                        Text(err)
+                            .font(.system(size: 13))
+                            .foregroundStyle(colors.textSecondary)
+                            .multilineTextAlignment(.center)
+                        SiapFilledButton("Coba Lagi", icon: "arrow.clockwise", bg: colors.primaryAction, fg: colors.onPrimaryAction) {
+                            Task { await loadHistory() }
+                        }
+                    }
+                    .padding(24)
+                } else if app.redistHistory.isEmpty {
+                    VStack(spacing: 10) {
+                        Image(systemName: "arrow.left.arrow.right.circle")
+                            .font(.system(size: 36))
+                            .foregroundStyle(colors.textHint)
+                        Text("Belum ada riwayat permohonan Redist")
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundStyle(colors.textSecondary)
+                        SiapFilledButton("Ajukan Redist Baru", icon: "plus.circle.fill", bg: SiapColors.brandAmber, fg: Color(hex: 0x0B131D)) {
+                            showForm = true
+                        }
+                        .frame(maxWidth: 220)
+                    }
+                    .padding(.top, 50)
+                } else {
+                    ForEach(app.redistHistory) { item in
+                        VStack(alignment: .leading, spacing: 7) {
+                            HStack {
+                                Text("PIB \(item.noPib.isEmpty ? "-" : item.noPib)")
+                                    .font(.system(size: 15, weight: .heavy, design: .rounded))
+                                    .foregroundStyle(colors.textPrimary)
+                                Spacer()
+                                redistStatusPill(item.status)
+                            }
+                            if !item.importir.isEmpty && item.importir != "-" {
+                                Text(item.importir)
+                                    .font(.system(size: 13, weight: .semibold))
+                                    .foregroundStyle(colors.textSecondary)
+                                    .lineLimit(2)
+                            }
+                            HStack(spacing: 8) {
+                                if !item.kodeTiket.isEmpty {
+                                    Text("Tiket: \(item.kodeTiket)")
+                                        .font(.system(size: 11, weight: .medium, design: .monospaced))
+                                        .foregroundStyle(colors.textHint)
+                                }
+                                if !item.tps.isEmpty && item.tps != "-" {
+                                    Text("• TPS \(item.tps)")
+                                        .font(.system(size: 11, weight: .semibold))
+                                        .foregroundStyle(colors.secondary)
+                                }
+                                if !item.cluster.isEmpty {
+                                    Text("• \(item.cluster)")
+                                        .font(.system(size: 11, weight: .bold))
+                                        .foregroundStyle(SiapColors.brandAmber)
+                                }
+                            }
+                            if !item.alasan.isEmpty {
+                                Text("Alasan: \(item.alasan)")
+                                    .font(.system(size: 12))
+                                    .foregroundStyle(colors.textPrimary)
+                            }
+                            if !item.tanggalPengajuan.isEmpty {
+                                Text("Diajukan: \(item.tanggalPengajuan)")
+                                    .font(.system(size: 11))
+                                    .foregroundStyle(colors.textHint)
+                            }
+                        }
+                        .padding(13)
+                        .background(colors.surface)
+                        .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).stroke(colors.cardBorder, lineWidth: 1))
+                        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    }
+                }
+            }
+            .padding(14)
+        }
+    }
+
+    private var redistFormContent: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 14) {
+                if !app.pibs.isEmpty {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Pilih Cepat dari Daftar PIB Beranda")
+                            .font(.system(size: 12, weight: .bold))
+                            .foregroundStyle(colors.textSecondary)
+                        ScrollView(.horizontal, showsIndicators: false) {
+                            HStack(spacing: 8) {
+                                ForEach(app.pibs) { doc in
+                                    let selected = kodeTiket == doc.kodeTiket
+                                    Button {
+                                        kodeTiket = doc.kodeTiket
+                                    } label: {
+                                        VStack(alignment: .leading, spacing: 2) {
+                                            Text("PIB \(doc.noPib)")
+                                                .font(.system(size: 12, weight: .bold))
+                                            Text(doc.kodeTiket)
+                                                .font(.system(size: 10, design: .monospaced))
+                                                .opacity(0.8)
+                                        }
+                                        .padding(.horizontal, 10)
+                                        .padding(.vertical, 7)
+                                        .background(selected ? SiapColors.brandAmber : colors.surfaceElevated)
+                                        .foregroundStyle(selected ? Color(hex: 0x0B131D) : colors.textPrimary)
+                                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                                    }
+                                    .buttonStyle(.plain)
+                                }
+                            }
+                        }
+                    }
+                }
+
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Kode Tiket *")
+                        .font(.system(size: 12.5, weight: .bold))
+                        .foregroundStyle(colors.textPrimary)
+                    TextField("Masukkan Kode Tiket PIB", text: $kodeTiket)
+                        .font(.system(size: 14, design: .monospaced))
+                        .padding(11)
+                        .background(colors.surface)
+                        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(colors.cardBorder, lineWidth: 1))
+                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                        .autocorrectionDisabled()
+                }
+
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Cluster *")
+                        .font(.system(size: 12.5, weight: .bold))
+                        .foregroundStyle(colors.textPrimary)
+                    Picker("Cluster", selection: $selectedCluster) {
+                        ForEach(schema.clusters) { opt in
+                            Text(opt.label).tag(opt.value)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(colors.surface)
+                    .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(colors.cardBorder, lineWidth: 1))
+                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                }
+
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Alasan Redist *")
+                        .font(.system(size: 12.5, weight: .bold))
+                        .foregroundStyle(colors.textPrimary)
+                    Picker("Alasan", selection: $selectedAlasan) {
+                        ForEach(schema.alasanOptions) { opt in
+                            Text(opt.label).tag(opt.value)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(colors.surface)
+                    .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(colors.cardBorder, lineWidth: 1))
+                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                }
+
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Keterangan")
+                        .font(.system(size: 12.5, weight: .bold))
+                        .foregroundStyle(colors.textPrimary)
+                    TextEditor(text: $keterangan)
+                        .frame(minHeight: 80)
+                        .padding(6)
+                        .background(colors.surface)
+                        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(colors.cardBorder, lineWidth: 1))
+                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                }
+
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Lampiran Foto Permohonan * (Wajib, maks 10 MB)")
+                        .font(.system(size: 12.5, weight: .bold))
+                        .foregroundStyle(colors.textPrimary)
+
+                    if let img = pickedImage {
+                        Image(uiImage: img)
+                            .resizable()
+                            .scaledToFit()
+                            .frame(maxHeight: 190)
+                            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    }
+
+                    HStack(spacing: 10) {
+                        SiapOutlinedButton("Kamera", icon: "camera.fill", color: colors.secondary) {
+                            showCameraPicker = true
+                        }
+                        SiapOutlinedButton("Galeri", icon: "photo.on.rectangle", color: SiapColors.brandAmber) {
+                            showGalleryPicker = true
+                        }
+                    }
+                }
+
+                if let ferr = formError {
+                    Text(ferr)
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(colors.danger)
+                }
+
+                Button {
+                    Task { await submitForm() }
+                } label: {
+                    HStack(spacing: 8) {
+                        if isSubmitting { ProgressView().tint(Color(hex: 0x0B131D)) }
+                        Text(isSubmitting ? "Mengirim..." : "Kirim Permohonan Redist")
+                    }
+                    .font(.system(size: 14.5, weight: .heavy))
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 14)
+                    .background(SiapColors.brandAmber)
+                    .foregroundStyle(Color(hex: 0x0B131D))
+                    .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
+                }
+                .buttonStyle(.plain)
+                .disabled(isSubmitting)
+            }
+            .padding(14)
+        }
+    }
+
+    private func redistStatusPill(_ status: String) -> some View {
+        let low = status.lowercased()
+        let tint: Color = (low.contains("setuju") || low.contains("approve") || low.contains("selesai"))
+            ? colors.success
+            : ((low.contains("tolak") || low.contains("reject")) ? colors.danger : SiapColors.brandAmber)
+        return Text(status.isEmpty ? "PROSES" : status.uppercased())
+            .font(.system(size: 10.5, weight: .bold))
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(tint.opacity(0.16))
+            .foregroundStyle(tint)
+            .clipShape(Capsule())
+    }
+
+    private func loadHistory() async {
+        guard let sess = app.session else { return }
+        isLoading = true
+        errorMsg = nil
+        defer { isLoading = false }
+        do {
+            app.redistHistory = try await SiapApiClient.shared.fetchRedistHistory(
+                username: sess.username,
+                password: sess.password,
+                fallbackEmail: sess.usernameEmail
+            )
+        } catch {
+            errorMsg = error.localizedDescription
+        }
+    }
+
+    private func loadSchema() async {
+        guard let sess = app.session else { return }
+        let loaded = await SiapApiClient.shared.loadRedistFormSchema(
+            username: sess.username,
+            password: sess.password,
+            fallbackEmail: sess.usernameEmail
+        )
+        schema = loaded
+        if !loaded.clusters.contains(where: { $0.value == selectedCluster }), let first = loaded.clusters.first {
+            selectedCluster = first.value
+        }
+        if !loaded.alasanOptions.contains(where: { $0.value == selectedAlasan }), let first = loaded.alasanOptions.first {
+            selectedAlasan = first.value
+        }
+        if kodeTiket.isEmpty, let firstPib = app.pibs.first {
+            kodeTiket = firstPib.kodeTiket
+        }
+    }
+
+    private func submitForm() async {
+        guard let sess = app.session else { return }
+        let tiket = kodeTiket.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !tiket.isEmpty else {
+            formError = "Kode Tiket wajib diisi."
+            return
+        }
+        guard let img = pickedImage, let jpgData = img.jpegData(compressionQuality: 0.82) else {
+            formError = "Lampiran foto permohonan Redist wajib dipilih."
+            return
+        }
+        isSubmitting = true
+        formError = nil
+        defer { isSubmitting = false }
+        do {
+            let msg = try await SiapApiClient.shared.submitRedist(
+                username: sess.username,
+                password: sess.password,
+                fallbackEmail: sess.usernameEmail,
+                kodeTiket: tiket,
+                cluster: selectedCluster,
+                alasan: selectedAlasan,
+                keterangan: keterangan,
+                imageData: jpgData,
+                filename: "redist_\(SiapCrypto.sanitizeToken(tiket)).jpg"
+            )
+            app.showToast(msg)
+            pickedImage = nil
+            keterangan = ""
+            showForm = false
+            await loadHistory()
+        } catch {
+            formError = error.localizedDescription
+        }
+    }
+}
+
+// MARK: - Authentic Android Hold Sheet (Daftar Hold + Ajukan Hold)
+
+struct HoldSheetView: View {
+    @EnvironmentObject var app: AppState
+    @Environment(\.dismiss) private var dismiss
+    let colors: SiapColors
+
+    @State private var showForm = false
+    @State private var isLoading = false
+    @State private var errorMsg: String?
+
+    // Form state
+    @State private var schema = RedistHoldFormSchema(
+        clusters: RedistHoldFormSchema.defaultClusters,
+        alasanOptions: RedistHoldFormSchema.defaultHoldAlasan
+    )
+    @State private var selectedCluster = "GSRA"
+    @State private var selectedAlasan = "Off"
+    @State private var tanggalDate = Date()
+    @State private var waktuMulaiDate: Date = {
+        var comps = Calendar.current.dateComponents([.year, .month, .day], from: Date())
+        comps.hour = 8
+        comps.minute = 0
+        return Calendar.current.date(from: comps) ?? Date()
+    }()
+    @State private var waktuSelesaiDate: Date = {
+        var comps = Calendar.current.dateComponents([.year, .month, .day], from: Date())
+        comps.hour = 17
+        comps.minute = 0
+        return Calendar.current.date(from: comps) ?? Date()
+    }()
+    @State private var keterangan = ""
+    @State private var isSubmitting = false
+    @State private var formError: String?
+
+    var body: some View {
+        NavigationView {
+            VStack(spacing: 0) {
+                // Mode Switcher Pill (Riwayat Hold | Ajukan Hold)
+                HStack(spacing: 8) {
+                    Button {
+                        showForm = false
+                    } label: {
+                        Text("Riwayat Hold (\(app.holdHistory.count))")
+                            .font(.system(size: 13, weight: .bold))
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 9)
+                            .background(!showForm ? SiapColors.brandSky : colors.surfaceElevated)
+                            .foregroundStyle(!showForm ? Color(hex: 0x0B131D) : colors.textSecondary)
+                            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    }
+                    .buttonStyle(.plain)
+
+                    Button {
+                        showForm = true
+                        Task { await loadSchema() }
+                    } label: {
+                        HStack(spacing: 5) {
+                            Image(systemName: "plus.circle.fill")
+                            Text("Ajukan Hold")
+                        }
+                        .font(.system(size: 13, weight: .bold))
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 9)
+                        .background(showForm ? SiapColors.brandSky : colors.surfaceElevated)
+                        .foregroundStyle(showForm ? Color(hex: 0x0B131D) : colors.textSecondary)
+                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    }
+                    .buttonStyle(.plain)
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
+                .background(colors.surface)
+
+                if showForm {
+                    holdFormContent
+                } else {
+                    holdHistoryContent
+                }
+            }
+            .background(colors.backdrop.ignoresSafeArea())
+            .navigationTitle("Permohonan Hold / Izin")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Tutup") { dismiss() }
+                }
+                if !showForm {
+                    ToolbarItem(placement: .primaryAction) {
+                        Button {
+                            Task { await loadHistory() }
+                        } label: {
+                            Image(systemName: "arrow.clockwise")
+                        }
+                        .disabled(isLoading)
+                    }
+                }
+            }
+            .task {
+                if app.holdHistory.isEmpty {
+                    await loadHistory()
+                }
+                await loadSchema()
+            }
+        }
+    }
+
+    private var holdHistoryContent: some View {
+        ScrollView {
+            LazyVStack(spacing: 10) {
+                if isLoading {
+                    ProgressView("Memuat riwayat Hold...")
+                        .padding(.top, 40)
+                } else if let err = errorMsg {
+                    VStack(spacing: 10) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .font(.system(size: 28))
+                            .foregroundStyle(colors.warning)
+                        Text(err)
+                            .font(.system(size: 13))
+                            .foregroundStyle(colors.textSecondary)
+                            .multilineTextAlignment(.center)
+                        SiapFilledButton("Coba Lagi", icon: "arrow.clockwise", bg: colors.primaryAction, fg: colors.onPrimaryAction) {
+                            Task { await loadHistory() }
+                        }
+                    }
+                    .padding(24)
+                } else if app.holdHistory.isEmpty {
+                    VStack(spacing: 10) {
+                        Image(systemName: "pause.circle")
+                            .font(.system(size: 36))
+                            .foregroundStyle(colors.textHint)
+                        Text("Belum ada riwayat permohonan Hold")
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundStyle(colors.textSecondary)
+                        SiapFilledButton("Ajukan Hold Baru", icon: "plus.circle.fill", bg: SiapColors.brandSky, fg: Color(hex: 0x0B131D)) {
+                            showForm = true
+                        }
+                        .frame(maxWidth: 220)
+                    }
+                    .padding(.top, 50)
+                } else {
+                    ForEach(app.holdHistory) { item in
+                        VStack(alignment: .leading, spacing: 7) {
+                            HStack {
+                                Text(item.alasan.isEmpty ? "Permohonan Hold" : item.alasan)
+                                    .font(.system(size: 14.5, weight: .bold))
+                                    .foregroundStyle(colors.textPrimary)
+                                    .lineLimit(2)
+                                Spacer()
+                                holdStatusPill(item.status)
+                            }
+                            HStack(spacing: 8) {
+                                if !item.cluster.isEmpty {
+                                    Text("Cluster \(item.cluster)")
+                                        .font(.system(size: 11.5, weight: .bold))
+                                        .foregroundStyle(SiapColors.brandSky)
+                                }
+                                if !item.tanggalPengajuan.isEmpty {
+                                    Text("• \(item.tanggalPengajuan)")
+                                        .font(.system(size: 11.5))
+                                        .foregroundStyle(colors.textHint)
+                                }
+                            }
+                            HStack(spacing: 6) {
+                                Image(systemName: "clock.fill")
+                                    .font(.system(size: 11))
+                                    .foregroundStyle(colors.secondary)
+                                Text("\(item.waktuMulai) — \(item.waktuSelesai)")
+                                    .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                                    .foregroundStyle(colors.textSecondary)
+                            }
+                        }
+                        .padding(13)
+                        .background(colors.surface)
+                        .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).stroke(colors.cardBorder, lineWidth: 1))
+                        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    }
+                }
+            }
+            .padding(14)
+        }
+    }
+
+    private var holdFormContent: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 14) {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Cluster *")
+                        .font(.system(size: 12.5, weight: .bold))
+                        .foregroundStyle(colors.textPrimary)
+                    Picker("Cluster", selection: $selectedCluster) {
+                        ForEach(schema.clusters) { opt in
+                            Text(opt.label).tag(opt.value)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(colors.surface)
+                    .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(colors.cardBorder, lineWidth: 1))
+                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                }
+
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Alasan Hold *")
+                        .font(.system(size: 12.5, weight: .bold))
+                        .foregroundStyle(colors.textPrimary)
+                    Picker("Alasan", selection: $selectedAlasan) {
+                        ForEach(schema.alasanOptions) { opt in
+                            Text(opt.label).tag(opt.value)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(colors.surface)
+                    .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(colors.cardBorder, lineWidth: 1))
+                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                }
+
+                VStack(alignment: .leading, spacing: 10) {
+                    DatePicker("Tanggal Hold", selection: $tanggalDate, displayedComponents: .date)
+                        .font(.system(size: 13.5, weight: .semibold))
+                        .foregroundStyle(colors.textPrimary)
+
+                    HStack(spacing: 12) {
+                        DatePicker("Mulai", selection: $waktuMulaiDate, displayedComponents: .hourAndMinute)
+                            .font(.system(size: 13, weight: .semibold))
+                        DatePicker("Selesai", selection: $waktuSelesaiDate, displayedComponents: .hourAndMinute)
+                            .font(.system(size: 13, weight: .semibold))
+                    }
+                }
+                .padding(12)
+                .background(colors.surface)
+                .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).stroke(colors.cardBorder, lineWidth: 1))
+                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+
+                if !app.pibs.isEmpty {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Sisipkan PIB Tanggungan ke Keterangan (Opsional)")
+                            .font(.system(size: 11.5, weight: .semibold))
+                            .foregroundStyle(colors.textSecondary)
+                        ScrollView(.horizontal, showsIndicators: false) {
+                            HStack(spacing: 8) {
+                                ForEach(app.pibs) { doc in
+                                    Button {
+                                        let snippet = "PIB \(doc.noPib) (\(doc.kodeTps))"
+                                        if keterangan.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                                            keterangan = snippet
+                                        } else if !keterangan.contains(doc.noPib) {
+                                            keterangan += ", \(snippet)"
+                                        }
+                                    } label: {
+                                        Text("+ PIB \(doc.noPib)")
+                                            .font(.system(size: 11.5, weight: .bold))
+                                            .padding(.horizontal, 10)
+                                            .padding(.vertical, 6)
+                                            .background(colors.primaryContainer)
+                                            .foregroundStyle(colors.onPrimaryContainer)
+                                            .clipShape(Capsule())
+                                    }
+                                    .buttonStyle(.plain)
+                                }
+                            }
+                        }
+                    }
+                }
+
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Keterangan *")
+                        .font(.system(size: 12.5, weight: .bold))
+                        .foregroundStyle(colors.textPrimary)
+                    TextEditor(text: $keterangan)
+                        .frame(minHeight: 90)
+                        .padding(6)
+                        .background(colors.surface)
+                        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(colors.cardBorder, lineWidth: 1))
+                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                }
+
+                if let ferr = formError {
+                    Text(ferr)
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(colors.danger)
+                }
+
+                Button {
+                    Task { await submitForm() }
+                } label: {
+                    HStack(spacing: 8) {
+                        if isSubmitting { ProgressView().tint(Color(hex: 0x0B131D)) }
+                        Text(isSubmitting ? "Mengirim..." : "Kirim Permohonan Hold")
+                    }
+                    .font(.system(size: 14.5, weight: .heavy))
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 14)
+                    .background(SiapColors.brandSky)
+                    .foregroundStyle(Color(hex: 0x0B131D))
+                    .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
+                }
+                .buttonStyle(.plain)
+                .disabled(isSubmitting)
+            }
+            .padding(14)
+        }
+    }
+
+    private func holdStatusPill(_ status: String) -> some View {
+        let low = status.lowercased()
+        let tint: Color = (low.contains("setuju") || low.contains("approve") || low.contains("selesai"))
+            ? colors.success
+            : ((low.contains("tolak") || low.contains("reject")) ? colors.danger : SiapColors.brandSky)
+        return Text(status.isEmpty ? "PROSES" : status.uppercased())
+            .font(.system(size: 10.5, weight: .bold))
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(tint.opacity(0.16))
+            .foregroundStyle(tint)
+            .clipShape(Capsule())
+    }
+
+    private func loadHistory() async {
+        guard let sess = app.session else { return }
+        isLoading = true
+        errorMsg = nil
+        defer { isLoading = false }
+        do {
+            app.holdHistory = try await SiapApiClient.shared.fetchHoldHistory(
+                username: sess.username,
+                password: sess.password,
+                fallbackEmail: sess.usernameEmail
+            )
+        } catch {
+            errorMsg = error.localizedDescription
+        }
+    }
+
+    private func loadSchema() async {
+        guard let sess = app.session else { return }
+        let loaded = await SiapApiClient.shared.loadHoldFormSchema(
+            username: sess.username,
+            password: sess.password,
+            fallbackEmail: sess.usernameEmail
+        )
+        schema = loaded
+        if !loaded.clusters.contains(where: { $0.value == selectedCluster }), let first = loaded.clusters.first {
+            selectedCluster = first.value
+        }
+        if !loaded.alasanOptions.contains(where: { $0.value == selectedAlasan }), let first = loaded.alasanOptions.first {
+            selectedAlasan = first.value
+        }
+    }
+
+    private func submitForm() async {
+        guard let sess = app.session else { return }
+        let ket = keterangan.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !ket.isEmpty else {
+            formError = "Keterangan permohonan Hold wajib diisi."
+            return
+        }
+        let tglStr = SiapCrypto.wibFormatter("yyyy-MM-dd").string(from: tanggalDate)
+        let mulaiStr = SiapCrypto.wibFormatter("HH:mm").string(from: waktuMulaiDate)
+        let selesaiStr = SiapCrypto.wibFormatter("HH:mm").string(from: waktuSelesaiDate)
+        isSubmitting = true
+        formError = nil
+        defer { isSubmitting = false }
+        do {
+            let msg = try await SiapApiClient.shared.submitHold(
+                username: sess.username,
+                password: sess.password,
+                fallbackEmail: sess.usernameEmail,
+                cluster: selectedCluster,
+                alasan: selectedAlasan,
+                keterangan: ket,
+                tanggal: tglStr,
+                wkMulai: mulaiStr,
+                wkSelesai: selesaiStr
+            )
+            app.showToast(msg)
+            keterangan = ""
+            showForm = false
+            await loadHistory()
+        } catch {
+            formError = error.localizedDescription
         }
     }
 }

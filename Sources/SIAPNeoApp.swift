@@ -207,6 +207,16 @@ struct SiapMainShell: View {
                 .environmentObject(app)
                 .preferredColorScheme(app.themeMode.preferredColorScheme)
         }
+        .sheet(isPresented: $app.showRedistSheet) {
+            RedistSheetView(colors: colors)
+                .environmentObject(app)
+                .preferredColorScheme(app.themeMode.preferredColorScheme)
+        }
+        .sheet(isPresented: $app.showHoldSheet) {
+            HoldSheetView(colors: colors)
+                .environmentObject(app)
+                .preferredColorScheme(app.themeMode.preferredColorScheme)
+        }
     }
 }
 
@@ -306,6 +316,18 @@ struct SiapTopAppBar: View {
                     .buttonStyle(.plain)
                     .disabled(app.isLoadingPibs)
                 }
+
+                Button {
+                    app.themeMode = colors.isDark ? .light : .dark
+                } label: {
+                    Image(systemName: colors.isDark ? "sun.max.fill" : "moon.fill")
+                        .font(.system(size: 14, weight: .bold))
+                        .foregroundStyle(.white)
+                        .frame(width: 34, height: 34)
+                        .background(Color.white.opacity(0.14))
+                        .clipShape(Circle())
+                }
+                .buttonStyle(.plain)
 
                 Button {
                     app.activeTab = .akun

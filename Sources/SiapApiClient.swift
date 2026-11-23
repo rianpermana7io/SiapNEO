@@ -1129,6 +1129,351 @@ final class SiapApiClient {
         return nil
     }
 
+    // MARK: - Redist & Hold (1:1 Port of Android Siap3WebClient)
+
+    private func extractDataTablesRows(from rawJson: String) -> [[String]] {
+        let trimmed = rawJson.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, let data = trimmed.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data) else {
+            return []
+        }
+        let rawList: [Any]
+        if let arr = obj as? [Any] {
+            rawList = arr
+        } else if let dict = obj as? [String: Any] {
+            rawList = (dict["data"] as? [Any]) ?? (dict["aaData"] as? [Any]) ?? []
+        } else {
+            return []
+        }
+        var out: [[String]] = []
+        for entry in rawList {
+            if let arr = entry as? [Any] {
+                out.append(arr.map { stripHtml(String(describing: $0)) })
+            } else if let dict = entry as? [String: Any] {
+                var row: [String] = []
+                for idx in 0..<10 {
+                    if let val = dict[String(idx)] {
+                        row.append(stripHtml(String(describing: val)))
+                    }
+                }
+                if !row.isEmpty { out.append(row) }
+            }
+        }
+        return out
+    }
+
+    private func parseHtmlSelectOptions(html: String, selectName: String) -> [SiapSelectOption] {
+        let selectPattern = "<select[^>]+name=[\"']\(NSRegularExpression.escapedPattern(for: selectName))[\"'][^>]*>(.*?)</select>"
+        guard let selRegex = try? NSRegularExpression(pattern: selectPattern, options: [.caseInsensitive, .dotMatchesLineSeparators]),
+              let optRegex = try? NSRegularExpression(pattern: "<option\\b([^>]*)>(.*?)</option>", options: [.caseInsensitive, .dotMatchesLineSeparators]),
+              let valRegex = try? NSRegularExpression(pattern: "\\bvalue\\s*=\\s*[\"']([^\"']*)[\"']", options: [.caseInsensitive]) else {
+            return []
+        }
+        let nsHtml = html as NSString
+        guard let selMatch = selRegex.firstMatch(in: html, range: NSRange(location: 0, length: nsHtml.length)) else {
+            return []
+        }
+        let inner = nsHtml.substring(with: selMatch.range(at: 1))
+        let nsInner = inner as NSString
+        var out: [SiapSelectOption] = []
+        for m in optRegex.matches(in: inner, range: NSRange(location: 0, length: nsInner.length)) {
+            let attrs = nsInner.substring(with: m.range(at: 1))
+            let label = stripHtml(nsInner.substring(with: m.range(at: 2)))
+            var val = label
+            let nsAttrs = attrs as NSString
+            if let vm = valRegex.firstMatch(in: attrs, range: NSRange(location: 0, length: nsAttrs.length)) {
+                val = nsAttrs.substring(with: vm.range(at: 1)).trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+            if val.isEmpty || label.isEmpty || label.caseInsensitiveCompare("Pilih") == .orderedSame {
+                continue
+            }
+            out.append(SiapSelectOption(value: val, label: label))
+        }
+        return out
+    }
+
+    private func buildMultipartBody(
+        boundary: String,
+        fields: [(String, String)],
+        fileField: (name: String, filename: String, mimeType: String, data: Data)? = nil
+    ) -> Data {
+        var body = Data()
+        for (k, v) in fields {
+            body.append(Data("--\(boundary)\r\n".utf8))
+            body.append(Data("Content-Disposition: form-data; name=\"\(k)\"\r\n\r\n".utf8))
+            body.append(Data("\(v)\r\n".utf8))
+        }
+        if let file = fileField {
+            body.append(Data("--\(boundary)\r\n".utf8))
+            body.append(Data("Content-Disposition: form-data; name=\"\(file.name)\"; filename=\"\(file.filename)\"\r\n".utf8))
+            body.append(Data("Content-Type: \(file.mimeType)\r\n\r\n".utf8))
+            body.append(file.data)
+            body.append(Data("\r\n".utf8))
+        }
+        body.append(Data("--\(boundary)--\r\n".utf8))
+        return body
+    }
+
+    func fetchRedistHistory(username: String, password: String, fallbackEmail: String = "") async throws -> [RedistHistoryItem] {
+        for attempt in 0..<2 {
+            try await ensureSiap3Login(username: username, password: password, fallbackEmail: fallbackEmail, force: attempt > 0)
+            guard let url = URL(string: "\(SiapCrypto.siap3Base)/siapfb_pemeriksa/get_redist_ppf") else {
+                throw SiapApiError.invalidURL
+            }
+            var req = URLRequest(url: url)
+            req.httpMethod = "GET"
+            req.setValue(desktopUserAgent, forHTTPHeaderField: "User-Agent")
+            req.setValue("XMLHttpRequest", forHTTPHeaderField: "X-Requested-With")
+            req.setValue("\(SiapCrypto.siap3Base)/home", forHTTPHeaderField: "Referer")
+
+            let (data, resp) = try await siap3Session.data(for: req)
+            let body = (String(data: data, encoding: .utf8) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            if isSiap3SessionExpired(response: resp, body: body) || (!body.isEmpty && !body.hasPrefix("{") && !body.hasPrefix("[")) {
+                invalidateSiap3Session()
+                if attempt == 0 { continue }
+                throw SiapApiError.message("Sesi SIAP 3.0 berakhir atau respons Redist tidak dikenali.")
+            }
+            if let http = resp as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
+                throw SiapApiError.httpError(http.statusCode, "Gagal mengambil daftar Redist")
+            }
+            let rows = extractDataTablesRows(from: body)
+            var items: [RedistHistoryItem] = rows.compactMap { cols in
+                guard cols.count >= 9 else { return nil }
+                return RedistHistoryItem(
+                    kodeTiket: cols[0],
+                    importir: cols[1],
+                    noPib: cols[2],
+                    tglPib: cols[3],
+                    tps: cols[4],
+                    cluster: cols[5],
+                    alasan: cols[6],
+                    tanggalPengajuan: cols[7],
+                    status: cols[8]
+                )
+            }
+            items.sort { a, b in
+                let ta = toSortableTimestamp(a.tanggalPengajuan)
+                let tb = toSortableTimestamp(b.tanggalPengajuan)
+                if ta != tb { return ta > tb }
+                return a.kodeTiket > b.kodeTiket
+            }
+            return items
+        }
+        return []
+    }
+
+    func fetchHoldHistory(username: String, password: String, fallbackEmail: String = "") async throws -> [HoldHistoryItem] {
+        for attempt in 0..<2 {
+            try await ensureSiap3Login(username: username, password: password, fallbackEmail: fallbackEmail, force: attempt > 0)
+            guard let url = URL(string: "\(SiapCrypto.siap3Base)/siapfb_pemeriksa/get_izin_ppf") else {
+                throw SiapApiError.invalidURL
+            }
+            var req = URLRequest(url: url)
+            req.httpMethod = "GET"
+            req.setValue(desktopUserAgent, forHTTPHeaderField: "User-Agent")
+            req.setValue("XMLHttpRequest", forHTTPHeaderField: "X-Requested-With")
+            req.setValue("\(SiapCrypto.siap3Base)/home", forHTTPHeaderField: "Referer")
+
+            let (data, resp) = try await siap3Session.data(for: req)
+            let body = (String(data: data, encoding: .utf8) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            if isSiap3SessionExpired(response: resp, body: body) || (!body.isEmpty && !body.hasPrefix("{") && !body.hasPrefix("[")) {
+                invalidateSiap3Session()
+                if attempt == 0 { continue }
+                throw SiapApiError.message("Sesi SIAP 3.0 berakhir atau respons Hold tidak dikenali.")
+            }
+            if let http = resp as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
+                throw SiapApiError.httpError(http.statusCode, "Gagal mengambil daftar Hold")
+            }
+            let rows = extractDataTablesRows(from: body)
+            var items: [HoldHistoryItem] = rows.compactMap { cols in
+                guard cols.count >= 6 else { return nil }
+                return HoldHistoryItem(
+                    tanggalPengajuan: cols[0],
+                    cluster: cols[1],
+                    alasan: cols[2],
+                    waktuMulai: cols[3],
+                    waktuSelesai: cols[4],
+                    status: cols[5]
+                )
+            }
+            items.sort { a, b in
+                let ta = toSortableTimestamp(a.tanggalPengajuan)
+                let tb = toSortableTimestamp(b.tanggalPengajuan)
+                if ta != tb { return ta > tb }
+                return toSortableTimestamp(a.waktuMulai) > toSortableTimestamp(b.waktuMulai)
+            }
+            return items
+        }
+        return []
+    }
+
+    func loadRedistFormSchema(username: String, password: String, fallbackEmail: String = "") async -> RedistHoldFormSchema {
+        do {
+            try await ensureSiap3Login(username: username, password: password, fallbackEmail: fallbackEmail, force: false)
+            guard let url = URL(string: "\(SiapCrypto.siap3Base)/siapfb_pemeriksa/form_permohonan_redist") else {
+                return RedistHoldFormSchema(clusters: RedistHoldFormSchema.defaultClusters, alasanOptions: RedistHoldFormSchema.defaultRedistAlasan)
+            }
+            var req = URLRequest(url: url)
+            req.setValue(desktopUserAgent, forHTTPHeaderField: "User-Agent")
+            req.setValue("XMLHttpRequest", forHTTPHeaderField: "X-Requested-With")
+            req.setValue("\(SiapCrypto.siap3Base)/home", forHTTPHeaderField: "Referer")
+            let (data, resp) = try await siap3Session.data(for: req)
+            if let http = resp as? HTTPURLResponse, http.statusCode == 200, !data.isEmpty,
+               let html = String(data: data, encoding: .utf8) {
+                let clusters = parseHtmlSelectOptions(html: html, selectName: "cluster")
+                let alasan = parseHtmlSelectOptions(html: html, selectName: "alasan")
+                return RedistHoldFormSchema(
+                    clusters: clusters.isEmpty ? RedistHoldFormSchema.defaultClusters : clusters,
+                    alasanOptions: alasan.isEmpty ? RedistHoldFormSchema.defaultRedistAlasan : alasan
+                )
+            }
+        } catch {}
+        return RedistHoldFormSchema(clusters: RedistHoldFormSchema.defaultClusters, alasanOptions: RedistHoldFormSchema.defaultRedistAlasan)
+    }
+
+    func loadHoldFormSchema(username: String, password: String, fallbackEmail: String = "") async -> RedistHoldFormSchema {
+        do {
+            try await ensureSiap3Login(username: username, password: password, fallbackEmail: fallbackEmail, force: false)
+            guard let url = URL(string: "\(SiapCrypto.siap3Base)/siapfb_pemeriksa/form_permohonan_hold") else {
+                return RedistHoldFormSchema(clusters: RedistHoldFormSchema.defaultClusters, alasanOptions: RedistHoldFormSchema.defaultHoldAlasan)
+            }
+            var req = URLRequest(url: url)
+            req.setValue(desktopUserAgent, forHTTPHeaderField: "User-Agent")
+            req.setValue("XMLHttpRequest", forHTTPHeaderField: "X-Requested-With")
+            req.setValue("\(SiapCrypto.siap3Base)/home", forHTTPHeaderField: "Referer")
+            let (data, resp) = try await siap3Session.data(for: req)
+            if let http = resp as? HTTPURLResponse, http.statusCode == 200, !data.isEmpty,
+               let html = String(data: data, encoding: .utf8) {
+                let clusters = parseHtmlSelectOptions(html: html, selectName: "cluster")
+                let alasan = parseHtmlSelectOptions(html: html, selectName: "alasan")
+                return RedistHoldFormSchema(
+                    clusters: clusters.isEmpty ? RedistHoldFormSchema.defaultClusters : clusters,
+                    alasanOptions: alasan.isEmpty ? RedistHoldFormSchema.defaultHoldAlasan : alasan
+                )
+            }
+        } catch {}
+        return RedistHoldFormSchema(clusters: RedistHoldFormSchema.defaultClusters, alasanOptions: RedistHoldFormSchema.defaultHoldAlasan)
+    }
+
+    func submitRedist(
+        username: String,
+        password: String,
+        fallbackEmail: String = "",
+        kodeTiket: String,
+        cluster: String,
+        alasan: String,
+        keterangan: String,
+        imageData: Data,
+        filename: String = "lampiran_redist.jpg"
+    ) async throws -> String {
+        guard !imageData.isEmpty else {
+            throw SiapApiError.message("Lampiran foto permohonan Redist wajib dipilih.")
+        }
+        guard imageData.count <= 10 * 1024 * 1024 else {
+            throw SiapApiError.message("Ukuran file tidak boleh lebih dari 10 MB.")
+        }
+        for attempt in 0..<2 {
+            try await ensureSiap3Login(username: username, password: password, fallbackEmail: fallbackEmail, force: attempt > 0)
+            guard let url = URL(string: "\(SiapCrypto.siap3Base)/siapfb_pemeriksa/simpan_redist") else {
+                throw SiapApiError.invalidURL
+            }
+            let boundary = "Boundary-\(UUID().uuidString)"
+            let bodyData = buildMultipartBody(
+                boundary: boundary,
+                fields: [
+                    ("kode_tiket", kodeTiket.trimmingCharacters(in: .whitespacesAndNewlines)),
+                    ("cluster", cluster.trimmingCharacters(in: .whitespacesAndNewlines)),
+                    ("alasan", alasan.trimmingCharacters(in: .whitespacesAndNewlines)),
+                    ("keterangan", keterangan.trimmingCharacters(in: .whitespacesAndNewlines))
+                ],
+                fileField: ("FileUpload", filename, "image/jpeg", imageData)
+            )
+            var req = URLRequest(url: url)
+            req.httpMethod = "POST"
+            req.timeoutInterval = 90
+            req.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
+            req.setValue(desktopUserAgent, forHTTPHeaderField: "User-Agent")
+            req.setValue("XMLHttpRequest", forHTTPHeaderField: "X-Requested-With")
+            req.setValue("\(SiapCrypto.siap3Base)/home", forHTTPHeaderField: "Referer")
+            req.setValue("https://bcpriok.net", forHTTPHeaderField: "Origin")
+            req.httpBody = bodyData
+
+            let (data, resp) = try await siap3Session.data(for: req)
+            let body = (String(data: data, encoding: .utf8) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            if isSiap3SessionExpired(response: resp, body: body) {
+                invalidateSiap3Session()
+                if attempt == 0 { continue }
+                throw SiapApiError.message("Sesi SIAP 3.0 berakhir, silakan coba kirim ulang.")
+            }
+            if let http = resp as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
+                throw SiapApiError.httpError(http.statusCode, "Gagal mengirim permohonan Redist")
+            }
+            if body.range(of: "SUCCESS", options: .caseInsensitive) != nil {
+                return "Data Berhasil Disimpan"
+            }
+            let clean = stripHtml(body)
+            throw SiapApiError.message(clean.isEmpty ? "Permohonan Redist gagal disimpan." : clean)
+        }
+        throw SiapApiError.message("Gagal mengirim permohonan Redist.")
+    }
+
+    func submitHold(
+        username: String,
+        password: String,
+        fallbackEmail: String = "",
+        cluster: String,
+        alasan: String,
+        keterangan: String,
+        tanggal: String,
+        wkMulai: String,
+        wkSelesai: String
+    ) async throws -> String {
+        for attempt in 0..<2 {
+            try await ensureSiap3Login(username: username, password: password, fallbackEmail: fallbackEmail, force: attempt > 0)
+            guard let url = URL(string: "\(SiapCrypto.siap3Base)/siapfb_pemeriksa/simpan_hold") else {
+                throw SiapApiError.invalidURL
+            }
+            let boundary = "Boundary-\(UUID().uuidString)"
+            let bodyData = buildMultipartBody(
+                boundary: boundary,
+                fields: [
+                    ("cluster", cluster.trimmingCharacters(in: .whitespacesAndNewlines)),
+                    ("alasan", alasan.trimmingCharacters(in: .whitespacesAndNewlines)),
+                    ("keterangan", keterangan.trimmingCharacters(in: .whitespacesAndNewlines)),
+                    ("tanggal", tanggal.trimmingCharacters(in: .whitespacesAndNewlines)),
+                    ("wk_mulai", wkMulai.trimmingCharacters(in: .whitespacesAndNewlines)),
+                    ("wk_selesai", wkSelesai.trimmingCharacters(in: .whitespacesAndNewlines))
+                ]
+            )
+            var req = URLRequest(url: url)
+            req.httpMethod = "POST"
+            req.timeoutInterval = 45
+            req.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
+            req.setValue(desktopUserAgent, forHTTPHeaderField: "User-Agent")
+            req.setValue("XMLHttpRequest", forHTTPHeaderField: "X-Requested-With")
+            req.setValue("\(SiapCrypto.siap3Base)/home", forHTTPHeaderField: "Referer")
+            req.setValue("https://bcpriok.net", forHTTPHeaderField: "Origin")
+            req.httpBody = bodyData
+
+            let (data, resp) = try await siap3Session.data(for: req)
+            let body = (String(data: data, encoding: .utf8) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            if isSiap3SessionExpired(response: resp, body: body) {
+                invalidateSiap3Session()
+                if attempt == 0 { continue }
+                throw SiapApiError.message("Sesi SIAP 3.0 berakhir, silakan coba kirim ulang.")
+            }
+            if let http = resp as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
+                throw SiapApiError.httpError(http.statusCode, "Gagal mengirim permohonan Hold")
+            }
+            if body.range(of: "SUCCESS", options: .caseInsensitive) != nil {
+                return "Data Berhasil Disimpan"
+            }
+            let clean = stripHtml(body)
+            throw SiapApiError.message(clean.isEmpty ? "Permohonan Hold gagal disimpan." : clean)
+        }
+        throw SiapApiError.message("Gagal mengirim permohonan Hold.")
+    }
+
     struct DownloadedDocument {
         let localURL: URL
         let isPDF: Bool
