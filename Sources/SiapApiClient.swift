@@ -858,7 +858,7 @@ final class SiapApiClient {
                     invalidateSiap3Session()
                     continue
                 }
-                throw SiapApiError.http(http.statusCode)
+                throw SiapApiError.httpError(http.statusCode, "Gagal mengunduh dokumen")
             }
             guard data.count >= 30 else {
                 throw SiapApiError.message("File dokumen kosong atau tidak ditemukan di server.")
@@ -881,7 +881,7 @@ final class SiapApiClient {
             let isImage = isPng || isJpg || contentType.contains("image/")
 
             let ext = isPdf ? "pdf" : (isPng ? "png" : (isJpg ? "jpg" : "pdf"))
-            let fileName = "siap_doc_\(Int(Date().timeIntervalSince1970))_\(abs(absUrlStr.hashValue)).\(ext)"
+            let fileName = "siap_doc_\(Int(Date().timeIntervalSince1970))_\(UInt(bitPattern: absUrlStr.hashValue)).\(ext)"
             let localURL = FileManager.default.temporaryDirectory.appendingPathComponent(fileName)
             try data.write(to: localURL, options: .atomic)
             return DownloadedDocument(localURL: localURL, isPDF: isPdf, isImage: isImage)
