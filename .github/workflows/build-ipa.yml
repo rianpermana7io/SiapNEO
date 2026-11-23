@@ -5,6 +5,9 @@ on:
     branches: [ main, master ]
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build-ipa:
     runs-on: macos-15
@@ -46,3 +49,13 @@ jobs:
           name: SIAPNeo-iOS-IPA
           path: SIAPNeo-iOS.ipa
           retention-days: 30
+
+      - name: Publish Direct Release IPA
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if gh release view latest >/dev/null 2>&1; then
+            gh release upload latest SIAPNeo-iOS.ipa --clobber
+          else
+            gh release create latest SIAPNeo-iOS.ipa --title "SIAP NEO iOS Latest" --notes "Latest automated iOS IPA build"
+          fi
