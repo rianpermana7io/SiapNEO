@@ -150,11 +150,34 @@ struct StepOption: Identifiable, Hashable {
     ]
 }
 
-struct PendokItem: Identifiable {
-    let id = UUID()
-    let title: String
-    let subtitle: String
+struct PendokBrowseItem: Identifiable, Hashable {
+    var id: String { "\(actionId)_\(noPib)_\(noAju)" }
+    let rowId: String
+    let noPib: String
+    let tglPib: String
+    let noAju: String
+    let namaImportir: String
+    let npwpImportir: String
+    let pfpd: String
+    let jalur: String
     let status: String
+    let isDitolak: Bool
+    let waktuStatus: String
+    let alasanPenolakan: String
+    let disdok: String
+    let coo: String
+    let actionId: String
+    let riwayatTerakhir: String
+}
+
+struct PendokDocumentAttachment: Identifiable, Hashable {
+    var id: String { "\(rawId)_\(fileUrl)" }
+    let rawId: String
+    let kodePelayanan: String
+    let jenisDokumen: String
+    let namaDokumen: String
+    let fileUrl: String
+    let tglUpload: String
 }
 
 struct TpsMonitorItem: Identifiable {

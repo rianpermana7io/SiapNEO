@@ -1,5 +1,6 @@
 import SwiftUI
 import WebKit
+import PDFKit
 
 // MARK: - Hex Color Helper
 
@@ -365,7 +366,53 @@ struct SiapLiveClockText: View {
     }
 }
 
-// MARK: - In-App WebView for Dokap PDF (PIB / INV-PL / B/L / BAP)
+// MARK: - Native PDFKit Viewer & Share Sheet (Matches Android DocumentViewerKt)
+
+struct SiapPdfKitView: UIViewRepresentable {
+    let url: URL
+    let rotationDegrees: Int
+
+    func makeUIView(context: Context) -> PDFView {
+        let pdfView = PDFView()
+        pdfView.autoScales = true
+        pdfView.displayMode = .singlePageContinuous
+        pdfView.displayDirection = .vertical
+        pdfView.backgroundColor = UIColor(red: 0.04, green: 0.07, blue: 0.09, alpha: 1.0)
+        if let doc = PDFDocument(url: url) {
+            pdfView.document = doc
+        }
+        return pdfView
+    }
+
+    func updateUIView(_ pdfView: PDFView, context: Context) {
+        if pdfView.document?.documentURL != url {
+            if let doc = PDFDocument(url: url) {
+                pdfView.document = doc
+            }
+        }
+        if let doc = pdfView.document {
+            let normRot = ((rotationDegrees % 360) + 360) % 360
+            for i in 0..<doc.pageCount {
+                if let page = doc.page(at: i), page.rotation != normRot {
+                    page.rotation = normRot
+                }
+            }
+            pdfView.layoutDocumentView()
+        }
+    }
+}
+
+struct SiapShareSheet: UIViewControllerRepresentable {
+    let items: [Any]
+
+    func makeUIViewController(context: Context) -> UIActivityViewController {
+        UIActivityViewController(activityItems: items, applicationActivities: nil)
+    }
+
+    func updateUIViewController(_ uiViewController: UIActivityViewController, context: Context) {}
+}
+
+// MARK: - Fallback WebView
 
 struct SiapWebView: UIViewRepresentable {
     let url: URL

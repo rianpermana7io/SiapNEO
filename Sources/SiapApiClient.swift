@@ -329,12 +329,20 @@ final class SiapApiClient {
 
     func fetchDokumen(kodeTiket: String) async throws -> [String: String] {
         let (_, data, _) = try await postForm(endpoint: "get_dokumen", fields: [("kode_tiket", kodeTiket)])
-        guard let dict = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
-            return [:]
+        let jsonObj = try? JSONSerialization.jsonObject(with: data)
+        var dict: [String: Any]?
+        if let d = jsonObj as? [String: Any] {
+            dict = d
+        } else if let arr = jsonObj as? [[String: Any]], let first = arr.first {
+            dict = first
         }
+        guard let dict else { return [:] }
         var out: [String: String] = [:]
         for (k, _) in dict {
-            out[k] = cleanField(dict, k, fallback: "")
+            let val = cleanField(dict, k, fallback: "")
+            if !val.isEmpty && val != "-" {
+                out[k] = val
+            }
         }
         return out
     }
@@ -485,25 +493,63 @@ final class SiapApiClient {
         }
     }
 
-    // MARK: - SIAP 3.0 Pendok Browse
+    // MARK: - SIAP 3.0 Pendok Browse, Lampiran Dokumen & Authenticated PDF Download
 
-    private func ensureSiap3Login(username: String, password: String) async throws {
-        if siap3LoggedInUser == username && Date().timeIntervalSince(siap3LoggedInAt) < 1200 {
-            return
+    private let desktopUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+
+    func absolutizeSiap3(_ raw: String) -> String {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return "" }
+        let encoded = trimmed.replacingOccurrences(of: " ", with: "%20")
+        if encoded.lowercased().hasPrefix("http://") || encoded.lowercased().hasPrefix("https://") {
+            return encoded
         }
+        if encoded.hasPrefix("/siap3.0") || encoded.hasPrefix("/slim3.0") || encoded.hasPrefix("/siap/") {
+            return "https://bcpriok.net" + encoded
+        }
+        if encoded.hasPrefix("/") {
+            return SiapCrypto.siap3Base + encoded
+        }
+        return "\(SiapCrypto.siap3Base)/\(encoded)"
+    }
+
+    func invalidateSiap3Session() {
+        siap3LoggedInUser = nil
+        siap3LoggedInAt = .distantPast
+    }
+
+    private func isSiap3SessionExpired(response: URLResponse?, body: String) -> Bool {
+        if let http = response as? HTTPURLResponse {
+            if http.statusCode == 401 || http.statusCode == 403 { return true }
+            if let finalUrl = http.url?.absoluteString.lowercased(),
+               finalUrl.contains("/auth/login") || finalUrl.hasSuffix("/login") {
+                return true
+            }
+        }
+        let low = body.lowercased()
+        if low.contains("auth/login_action") || low.contains("id=\"form-login\"") || low.contains("login - siap") {
+            return true
+        }
+        return false
+    }
+
+    private func attemptSingleSiap3Login(identity: String, password: String) async throws -> Bool {
         guard let loginPageUrl = URL(string: "\(SiapCrypto.siap3Base)/auth/login"),
               let loginPostUrl = URL(string: "\(SiapCrypto.siap3Base)/auth/login_action/") else {
             throw SiapApiError.invalidURL
         }
-        _ = try await siap3Session.data(from: loginPageUrl)
+        var getReq = URLRequest(url: loginPageUrl)
+        getReq.setValue(desktopUserAgent, forHTTPHeaderField: "User-Agent")
+        _ = try await siap3Session.data(for: getReq)
 
         var req = URLRequest(url: loginPostUrl)
         req.httpMethod = "POST"
+        req.setValue(desktopUserAgent, forHTTPHeaderField: "User-Agent")
         req.setValue("application/x-www-form-urlencoded; charset=UTF-8", forHTTPHeaderField: "Content-Type")
         req.setValue("XMLHttpRequest", forHTTPHeaderField: "X-Requested-With")
         req.setValue(loginPageUrl.absoluteString, forHTTPHeaderField: "Referer")
         req.httpBody = formEncode([
-            ("identity", username),
+            ("identity", identity),
             ("password", password),
             ("remember", "Remember Me")
         ])
@@ -515,44 +561,332 @@ final class SiapApiClient {
            let success = dict["success"] as? Bool {
             ok = success
         }
-        if !ok {
-            throw SiapApiError.message("Gagal login ke SIAP 3.0. Periksa username/password.")
-        }
-        siap3LoggedInUser = username
-        siap3LoggedInAt = Date()
+        return ok
     }
 
-    func browsePendok(username: String, password: String, query: String) async throws -> [PendokItem] {
-        try await ensureSiap3Login(username: username, password: password)
-        guard let url = URL(string: "\(SiapCrypto.siap3Base)/pendok_mk/browse_data") else {
+    func ensureSiap3Login(username: String, password: String, fallbackEmail: String = "", force: Bool = false) async throws {
+        let customUser = (UserDefaults.standard.string(forKey: "siapneo_siap3_user") ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let customPass = UserDefaults.standard.string(forKey: "siapneo_siap3_pass") ?? ""
+        let effectiveUser = customUser.isEmpty ? username.trimmingCharacters(in: .whitespacesAndNewlines) : customUser
+        let effectivePass = customPass.isEmpty ? password : customPass
+
+        if !force && siap3LoggedInUser == effectiveUser && Date().timeIntervalSince(siap3LoggedInAt) < 1200 {
+            return
+        }
+        guard !effectiveUser.isEmpty && !effectivePass.isEmpty else {
+            throw SiapApiError.message("Kredensial SIAP 3.0 belum tersedia. Atur di tab Akun.")
+        }
+
+        if try await attemptSingleSiap3Login(identity: effectiveUser, password: effectivePass) {
+            siap3LoggedInUser = effectiveUser
+            siap3LoggedInAt = Date()
+            return
+        }
+
+        let alt = fallbackEmail.trimmingCharacters(in: .whitespacesAndNewlines)
+        if customUser.isEmpty && !alt.isEmpty && alt.lowercased() != effectiveUser.lowercased() {
+            if try await attemptSingleSiap3Login(identity: alt, password: effectivePass) {
+                siap3LoggedInUser = effectiveUser
+                siap3LoggedInAt = Date()
+                return
+            }
+        }
+
+        throw SiapApiError.message("Gagal login SIAP 3.0. Cek kredensial SIAP 3.0 di tab Akun.")
+    }
+
+    private func extractFirstMatch(pattern: String, in text: String, group: Int = 1) -> String? {
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { return nil }
+        let ns = text as NSString
+        guard let m = regex.firstMatch(in: text, range: NSRange(location: 0, length: ns.length)),
+              m.numberOfRanges > group else { return nil }
+        let r = m.range(at: group)
+        guard r.location != NSNotFound else { return nil }
+        return ns.substring(with: r).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func buildDataTablesFields(start: Int, length: Int, search: String, columnCount: Int, orderable: Bool) -> [(String, String)] {
+        var fields: [(String, String)] = [
+            ("draw", "1"),
+            ("start", "\(start)"),
+            ("length", "\(length)"),
+            ("search[value]", search),
+            ("search[regex]", "false")
+        ]
+        for i in 0..<columnCount {
+            fields.append(("columns[\(i)][data]", "\(i)"))
+            fields.append(("columns[\(i)][name]", ""))
+            fields.append(("columns[\(i)][searchable]", "true"))
+            fields.append(("columns[\(i)][orderable]", orderable ? "true" : "false"))
+            fields.append(("columns[\(i)][search][value]", ""))
+            fields.append(("columns[\(i)][search][regex]", "false"))
+        }
+        return fields
+    }
+
+    /// Exact port of Siap3WebClient.fetchPendokBrowseData
+    func browsePendok(username: String, password: String, fallbackEmail: String = "", query: String, start: Int = 0, length: Int = 30) async throws -> [PendokBrowseItem] {
+        for attempt in 0..<2 {
+            try await ensureSiap3Login(username: username, password: password, fallbackEmail: fallbackEmail, force: attempt > 0)
+            guard let url = URL(string: "\(SiapCrypto.siap3Base)/pendok_mk/browse_data") else {
+                throw SiapApiError.invalidURL
+            }
+            var req = URLRequest(url: url)
+            req.httpMethod = "POST"
+            req.setValue(desktopUserAgent, forHTTPHeaderField: "User-Agent")
+            req.setValue("application/x-www-form-urlencoded; charset=UTF-8", forHTTPHeaderField: "Content-Type")
+            req.setValue("XMLHttpRequest", forHTTPHeaderField: "X-Requested-With")
+            req.setValue("\(SiapCrypto.siap3Base)/pendok_mk", forHTTPHeaderField: "Referer")
+            req.httpBody = formEncode(buildDataTablesFields(start: start, length: length, search: query, columnCount: 11, orderable: false))
+
+            let (data, resp) = try await siap3Session.data(for: req)
+            let body = String(data: data, encoding: .utf8) ?? ""
+            if isSiap3SessionExpired(response: resp, body: body) {
+                invalidateSiap3Session()
+                if attempt == 0 { continue }
+                throw SiapApiError.message("Sesi SIAP 3.0 berakhir. Silakan coba lagi.")
+            }
+
+            guard let dict = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
+                return []
+            }
+            let rawRows = (dict["data"] as? [[Any]]) ?? (dict["aaData"] as? [[Any]]) ?? []
+            return rawRows.compactMap { row -> PendokBrowseItem? in
+                guard row.count >= 2 else { return nil }
+                func rawCol(_ idx: Int) -> String { idx < row.count ? String(describing: row[idx]) : "" }
+                func col(_ idx: Int) -> String { stripHtml(rawCol(idx)) }
+
+                let col0 = col(0)
+                let col1 = col(1)
+                let col2 = col(2)
+                let col3 = col(3)
+                let col4 = col(4)
+                let col5 = col(5)
+                let col6 = col(6)
+                let col7 = col(7)
+                let col8 = col(8)
+                let col9 = col(9)
+                let lastRaw = rawCol(row.count - 1)
+
+                let actionId = extractFirstMatch(pattern: #"\bclass=["'][^"']*\bhistory\b[^"']*["'][^>]*\bdata(?:-id)?=["']([^"']+)["']"#, in: lastRaw)
+                    ?? extractFirstMatch(pattern: #"\bdata(?:-id)?=["']([^"']+)["'][^>]*\bclass=["'][^"']*\bhistory\b"#, in: lastRaw)
+                    ?? extractFirstMatch(pattern: #"\bdata(?:-id)?=["']([^"']+)["']"#, in: lastRaw)
+                    ?? col0
+
+                let col2LooksLikeDate = extractFirstMatch(pattern: #"(\d{2}[-/.]\d{2}[-/.]\d{4}|\d{4}[-/.]\d{2}[-/.]\d{2})"#, in: col2) != nil
+                let noPib: String
+                let tglPib: String
+                if col2LooksLikeDate {
+                    let digits = col1.filter(\.isNumber)
+                    noPib = digits.isEmpty ? col1 : digits
+                    tglPib = col2
+                } else {
+                    let parts = col1.components(separatedBy: CharacterSet(charactersIn: " /\n\t")).filter { !$0.isEmpty }
+                    let firstDigits = (parts.first ?? "").filter(\.isNumber)
+                    noPib = firstDigits.isEmpty ? col1 : firstDigits
+                    tglPib = parts.count > 1 ? parts[1] : col2
+                }
+
+                let importir = col2LooksLikeDate ? col3 : col2
+                let jalur = col2LooksLikeDate ? col6 : col3
+                let rawStatus = (!col2LooksLikeDate && col7.isEmpty) ? col5 : col7
+                let lowStatus = rawStatus.lowercased()
+                let isDitolak = lowStatus.contains("tolak") || lowStatus.contains("reject") || lowStatus.contains("kembali") || lowStatus.contains("batal")
+                let statusText = rawStatus.isEmpty ? (isDitolak ? "DITOLAK" : "DIPROSES") : rawStatus
+
+                return PendokBrowseItem(
+                    rowId: col0,
+                    noPib: noPib,
+                    tglPib: tglPib,
+                    noAju: col0,
+                    namaImportir: importir,
+                    npwpImportir: col4,
+                    pfpd: col5,
+                    jalur: jalur,
+                    status: statusText,
+                    isDitolak: isDitolak,
+                    waktuStatus: "",
+                    alasanPenolakan: isDitolak ? rawStatus : "",
+                    disdok: col8,
+                    coo: col9,
+                    actionId: actionId,
+                    riwayatTerakhir: rawStatus.isEmpty ? col6 : rawStatus
+                )
+            }
+        }
+        return []
+    }
+
+    /// Exact port of Siap3WebClient.fetchPendokAttachments (POST /pendok_mk/get_jenis_dokumen)
+    func fetchPendokAttachments(username: String, password: String, fallbackEmail: String = "", kodePelayanan: String) async throws -> [PendokDocumentAttachment] {
+        let cleanKode = kodePelayanan.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanKode.isEmpty else { return [] }
+
+        for attempt in 0..<2 {
+            try await ensureSiap3Login(username: username, password: password, fallbackEmail: fallbackEmail, force: attempt > 0)
+            guard let url = URL(string: "\(SiapCrypto.siap3Base)/pendok_mk/get_jenis_dokumen") else {
+                throw SiapApiError.invalidURL
+            }
+            var req = URLRequest(url: url)
+            req.httpMethod = "POST"
+            req.setValue(desktopUserAgent, forHTTPHeaderField: "User-Agent")
+            req.setValue("application/x-www-form-urlencoded; charset=UTF-8", forHTTPHeaderField: "Content-Type")
+            req.setValue("XMLHttpRequest", forHTTPHeaderField: "X-Requested-With")
+            req.setValue("\(SiapCrypto.siap3Base)/pendok_mk", forHTTPHeaderField: "Referer")
+            req.httpBody = formEncode([("kode_pelayanan", cleanKode)])
+
+            let (data, resp) = try await siap3Session.data(for: req)
+            let body = String(data: data, encoding: .utf8) ?? ""
+            if isSiap3SessionExpired(response: resp, body: body) {
+                invalidateSiap3Session()
+                if attempt == 0 { continue }
+                throw SiapApiError.message("Sesi SIAP 3.0 berakhir.")
+            }
+
+            let parsed = try? JSONSerialization.jsonObject(with: data)
+            var arr: [[String: Any]] = []
+            if let direct = parsed as? [[String: Any]] {
+                arr = direct
+            } else if let obj = parsed as? [String: Any] {
+                arr = (obj["data"] as? [[String: Any]]) ?? (obj["rows"] as? [[String: Any]]) ?? []
+            }
+
+            var out: [PendokDocumentAttachment] = []
+            for (idx, item) in arr.enumerated() {
+                var path = cleanField(item, "file_path", fallback: "")
+                if path.isEmpty { path = cleanField(item, "link", fallback: "") }
+                if path.isEmpty { path = cleanField(item, "url", fallback: "") }
+                guard !path.isEmpty else { continue }
+
+                var nama = cleanField(item, "nama_dokumen", fallback: "")
+                let jenis = cleanField(item, "jenis_dokumen", fallback: nama.isEmpty ? "Dokumen" : nama)
+                if nama.isEmpty { nama = jenis }
+                let tgl = cleanField(item, "tgl_upload", fallback: "")
+                let rawId = cleanField(item, "id", fallback: "\(idx)")
+
+                out.append(PendokDocumentAttachment(
+                    rawId: rawId,
+                    kodePelayanan: cleanKode,
+                    jenisDokumen: jenis,
+                    namaDokumen: nama,
+                    fileUrl: absolutizeSiap3(path),
+                    tglUpload: tgl
+                ))
+            }
+            return out
+        }
+        return []
+    }
+
+    /// Searches SIAP 3.0 pendok_mk by PIB number and returns all document attachments (PIB, INV, PL, B/L, COO, etc.)
+    func fetchAttachmentsForPib(username: String, password: String, fallbackEmail: String = "", noPib: String) async throws -> [PendokDocumentAttachment] {
+        let digits = noPib.filter(\.isNumber)
+        guard !digits.isEmpty else { return [] }
+        let items = try await browsePendok(username: username, password: password, fallbackEmail: fallbackEmail, query: digits, start: 0, length: 25)
+        let normTarget = String(digits.drop(while: { $0 == "0" }))
+        let matched = items.first(where: {
+            let d = $0.noPib.filter(\.isNumber)
+            let nd = String(d.drop(while: { $0 == "0" }))
+            return d == digits || (!normTarget.isEmpty && nd == normTarget)
+        }) ?? items.first
+        guard let kode = matched?.actionId, !kode.isEmpty else { return [] }
+        return try await fetchPendokAttachments(username: username, password: password, fallbackEmail: fallbackEmail, kodePelayanan: kode)
+    }
+
+    /// Searches SIAP 3.0 siapfb_pemeriksa/browse_data to find cetak_bap URL for a PIB
+    func fetchBapUrlForPib(username: String, password: String, fallbackEmail: String = "", noPib: String) async throws -> String? {
+        let digits = noPib.filter(\.isNumber)
+        guard !digits.isEmpty else { return nil }
+        for attempt in 0..<2 {
+            try await ensureSiap3Login(username: username, password: password, fallbackEmail: fallbackEmail, force: attempt > 0)
+            guard let url = URL(string: "\(SiapCrypto.siap3Base)/siapfb_pemeriksa/browse_data") else {
+                throw SiapApiError.invalidURL
+            }
+            var req = URLRequest(url: url)
+            req.httpMethod = "POST"
+            req.setValue(desktopUserAgent, forHTTPHeaderField: "User-Agent")
+            req.setValue("application/x-www-form-urlencoded; charset=UTF-8", forHTTPHeaderField: "Content-Type")
+            req.setValue("XMLHttpRequest", forHTTPHeaderField: "X-Requested-With")
+            req.setValue("\(SiapCrypto.siap3Base)/home", forHTTPHeaderField: "Referer")
+            req.httpBody = formEncode(buildDataTablesFields(start: 0, length: 25, search: digits, columnCount: 9, orderable: true))
+
+            let (data, resp) = try await siap3Session.data(for: req)
+            let body = String(data: data, encoding: .utf8) ?? ""
+            if isSiap3SessionExpired(response: resp, body: body) {
+                invalidateSiap3Session()
+                if attempt == 0 { continue }
+                return nil
+            }
+            guard let dict = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return nil }
+            let rows = (dict["data"] as? [[Any]]) ?? (dict["aaData"] as? [[Any]]) ?? []
+            for row in rows {
+                let joined = row.map { String(describing: $0) }.joined(separator: " ")
+                if let hash = extractFirstMatch(pattern: #"(?:cetak_bap)/([A-Za-z0-9+/=_-]+?)(?=["'?#&\s<]|$)"#, in: joined) {
+                    return "https://bcpriok.net/slim3.0/penerimaan_dokumen_merah_kuning/cetak_bap/\(hash)"
+                }
+            }
+            return nil
+        }
+        return nil
+    }
+
+    struct DownloadedDocument {
+        let localURL: URL
+        let isPDF: Bool
+        let isImage: Bool
+    }
+
+    /// Exact port of Siap3WebClient.downloadAttachmentFile — downloads PDF/Image using authenticated permissive-TLS session
+    func downloadDocumentFile(urlStr: String, username: String, password: String, fallbackEmail: String = "") async throws -> DownloadedDocument {
+        let absUrlStr = absolutizeSiap3(urlStr)
+        guard let url = URL(string: absUrlStr) else {
             throw SiapApiError.invalidURL
         }
-        var req = URLRequest(url: url)
-        req.httpMethod = "POST"
-        req.setValue("application/x-www-form-urlencoded; charset=UTF-8", forHTTPHeaderField: "Content-Type")
-        req.setValue("XMLHttpRequest", forHTTPHeaderField: "X-Requested-With")
-        req.setValue("\(SiapCrypto.siap3Base)/pendok_mk", forHTTPHeaderField: "Referer")
-        req.httpBody = formEncode([
-            ("draw", "1"),
-            ("start", "0"),
-            ("length", "30"),
-            ("search[value]", query),
-            ("search[regex]", "false")
-        ])
+        let needsSiap3Auth = absUrlStr.lowercased().contains("bcpriok.net/siap3.0") || absUrlStr.lowercased().contains("bcpriok.net/slim3.0")
 
-        let (data, _) = try await siap3Session.data(for: req)
-        guard let dict = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
-              let rows = dict["data"] as? [[Any]] else {
-            return []
-        }
+        for attempt in 0..<2 {
+            if needsSiap3Auth || attempt > 0 {
+                try? await ensureSiap3Login(username: username, password: password, fallbackEmail: fallbackEmail, force: attempt > 0)
+            }
+            var req = URLRequest(url: url)
+            req.setValue(desktopUserAgent, forHTTPHeaderField: "User-Agent")
+            req.setValue("\(SiapCrypto.siap3Base)/pendok_mk", forHTTPHeaderField: "Referer")
 
-        return rows.map { row in
-            let cleaned = row.map { stripHtml(String(describing: $0)) }.filter { !$0.isEmpty }
-            let title = cleaned.count > 1 ? cleaned[1] : (cleaned.first ?? "Dokumen")
-            let status = cleaned.last ?? ""
-            let sub = cleaned.dropFirst(2).prefix(4).joined(separator: " • ")
-            return PendokItem(title: title, subtitle: sub, status: status)
+            let (data, resp) = try await siap3Session.data(for: req)
+            if let http = resp as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
+                if (http.statusCode == 401 || http.statusCode == 403) && attempt == 0 {
+                    invalidateSiap3Session()
+                    continue
+                }
+                throw SiapApiError.http(http.statusCode)
+            }
+            guard data.count >= 30 else {
+                throw SiapApiError.message("File dokumen kosong atau tidak ditemukan di server.")
+            }
+
+            let headStr = String(data: data.prefix(512), encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
+            let contentType = ((resp as? HTTPURLResponse)?.value(forHTTPHeaderField: "Content-Type") ?? "").lowercased()
+            let looksHtml = contentType.contains("text/html") || headStr.hasPrefix("<!doctype html") || headStr.hasPrefix("<html") || headStr.contains("id=\"form-login\"")
+            if looksHtml {
+                if attempt == 0 {
+                    invalidateSiap3Session()
+                    continue
+                }
+                throw SiapApiError.message("Server mengembalikan halaman login HTML (cek kredensial SIAP 3.0 di tab Akun).")
+            }
+
+            let isPdf = data.prefix(5) == Data("%PDF-".utf8) || contentType.contains("pdf") || absUrlStr.lowercased().contains(".pdf")
+            let isPng = data.prefix(4) == Data([0x89, 0x50, 0x4E, 0x47])
+            let isJpg = data.prefix(2) == Data([0xFF, 0xD8])
+            let isImage = isPng || isJpg || contentType.contains("image/")
+
+            let ext = isPdf ? "pdf" : (isPng ? "png" : (isJpg ? "jpg" : "pdf"))
+            let fileName = "siap_doc_\(Int(Date().timeIntervalSince1970))_\(abs(absUrlStr.hashValue)).\(ext)"
+            let localURL = FileManager.default.temporaryDirectory.appendingPathComponent(fileName)
+            try data.write(to: localURL, options: .atomic)
+            return DownloadedDocument(localURL: localURL, isPDF: isPdf, isImage: isImage)
         }
+        throw SiapApiError.message("Gagal mengunduh dokumen.")
     }
 
     // MARK: - TPS Monitoring

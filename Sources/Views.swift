@@ -183,7 +183,7 @@ struct LoginView: View {
                             .font(.system(size: 13.5, weight: .medium))
                             .foregroundStyle(SiapColors.hintOnNavy)
 
-                        Text("Sistem Informasi Pemeriksaan Fisik • v1.19.2")
+                        Text("Sistem Informasi Pemeriksaan Fisik • v1.19.3")
                             .font(.system(size: 11, weight: .bold))
                             .padding(.horizontal, 12)
                             .padding(.vertical, 5)
@@ -820,9 +820,14 @@ struct HeaderPibFclPanel: View {
     let colors: SiapColors
 
     @State private var isRincianExpanded = true
+    @State private var isLampiranExpanded = true
     @State private var containers: [ContainerItem] = []
     @State private var isLoadingContainers = false
     @State private var dokapLinks: [String: String] = [:]
+    @State private var siap3Attachments: [PendokDocumentAttachment] = []
+    @State private var bapUrl: String?
+    @State private var isLoadingAttachments = false
+    @State private var attachmentNote: String?
     @State private var manualContainer = ""
     @State private var showAddContainer = false
     @State private var showTtdSheet = false
@@ -1076,6 +1081,118 @@ struct HeaderPibFclPanel: View {
                             }
                         }
                     }
+
+                    // Lampiran Dokumen Section (Merged SIAP FB get_dokumen + SIAP 3.0 pendok_mk/get_jenis_dokumen + BAP)
+                    VStack(spacing: 0) {
+                        Button {
+                            withAnimation(.easeInOut(duration: 0.2)) {
+                                isLampiranExpanded.toggle()
+                            }
+                        } label: {
+                            HStack(spacing: 8) {
+                                Image(systemName: "paperclip")
+                                    .foregroundStyle(colors.primaryAction)
+                                Text("Lampiran Dokumen (\(allLampiranRows.count))")
+                                    .font(.system(size: 14, weight: .bold))
+                                    .foregroundStyle(colors.textPrimary)
+                                Spacer()
+                                if isLoadingAttachments {
+                                    ProgressView().tint(colors.primaryAction).scaleEffect(0.8)
+                                }
+                                Button {
+                                    Task { await loadAttachments() }
+                                } label: {
+                                    Image(systemName: "arrow.clockwise")
+                                        .font(.system(size: 13, weight: .bold))
+                                        .foregroundStyle(colors.primaryAction)
+                                        .padding(4)
+                                }
+                                .buttonStyle(.plain)
+                                Image(systemName: isLampiranExpanded ? "chevron.up" : "chevron.down")
+                                    .font(.system(size: 12, weight: .bold))
+                                    .foregroundStyle(colors.textHint)
+                            }
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 12)
+                            .background(colors.surfaceElevated)
+                        }
+                        .buttonStyle(.plain)
+
+                        if isLampiranExpanded {
+                            VStack(spacing: 8) {
+                                if isLoadingAttachments && allLampiranRows.isEmpty {
+                                    HStack(spacing: 8) {
+                                        ProgressView().tint(colors.primaryAction)
+                                        Text("Mengambil lampiran dari SIAP FB & SIAP 3.0...")
+                                            .font(.system(size: 12.5))
+                                            .foregroundStyle(colors.textSecondary)
+                                    }
+                                    .padding(.vertical, 10)
+                                } else if allLampiranRows.isEmpty {
+                                    VStack(spacing: 6) {
+                                        Text("Belum ada lampiran ditemukan untuk PIB \(pib.noPib).")
+                                            .font(.system(size: 12.5))
+                                            .foregroundStyle(colors.textHint)
+                                        if let note = attachmentNote {
+                                            Text(note)
+                                                .font(.system(size: 11.5))
+                                                .foregroundStyle(colors.warning)
+                                                .multilineTextAlignment(.center)
+                                        }
+                                    }
+                                    .padding(.vertical, 8)
+                                } else {
+                                    ForEach(allLampiranRows) { row in
+                                        Button {
+                                            app.activeDokap = DokapTarget(title: row.title, url: row.url)
+                                        } label: {
+                                            HStack(spacing: 10) {
+                                                Image(systemName: "doc.richtext.fill")
+                                                    .font(.system(size: 17))
+                                                    .foregroundStyle(colors.primaryAction)
+                                                    .frame(width: 32, height: 32)
+                                                    .background(colors.primaryContainer)
+                                                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+
+                                                VStack(alignment: .leading, spacing: 2) {
+                                                    Text(row.title)
+                                                        .font(.system(size: 13, weight: .bold))
+                                                        .foregroundStyle(colors.textPrimary)
+                                                        .lineLimit(2)
+                                                    if !row.subtitle.isEmpty {
+                                                        Text(row.subtitle)
+                                                            .font(.system(size: 11))
+                                                            .foregroundStyle(colors.textHint)
+                                                            .lineLimit(1)
+                                                    }
+                                                }
+                                                Spacer()
+                                                Text("Lihat")
+                                                    .font(.system(size: 11.5, weight: .bold))
+                                                    .padding(.horizontal, 10)
+                                                    .padding(.vertical, 5)
+                                                    .background(colors.primaryAction)
+                                                    .foregroundStyle(colors.onPrimaryAction)
+                                                    .clipShape(Capsule())
+                                            }
+                                            .padding(10)
+                                            .background(colors.surfaceElevated)
+                                            .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
+                                        }
+                                        .buttonStyle(.plain)
+                                    }
+                                }
+                            }
+                            .padding(12)
+                            .background(colors.surface)
+                        }
+                    }
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 14, style: .continuous)
+                            .stroke(colors.cardBorder, lineWidth: 1)
+                    )
+                    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    .padding(.horizontal, 12)
                 }
                 .padding(.bottom, 20)
             }
@@ -1084,17 +1201,17 @@ struct HeaderPibFclPanel: View {
             VStack(spacing: 8) {
                 // Row 1: Dokap Quick Pills (PIB | INV/PL | B/L | BAP)
                 HStack(spacing: 6) {
-                    DokapPillButton(title: "PIB", icon: "doc.text.fill", available: findDokapUrl(keys: ["pib", "file_pib", "url_pib"]) != nil, colors: colors) {
-                        openDokap(title: "Dokumen PIB \(pib.noPib)", keys: ["pib", "file_pib", "url_pib"])
+                    DokapPillButton(title: "PIB", icon: "doc.text.fill", available: resolvePibUrl() != nil, colors: colors) {
+                        openResolvedDoc(title: "Dokumen PIB \(pib.noPib)", url: resolvePibUrl())
                     }
-                    DokapPillButton(title: "INV/PL", icon: "list.bullet.rectangle", available: findDokapUrl(keys: ["pl", "inv", "packing", "invoice"]) != nil, colors: colors) {
-                        openDokap(title: "INV / PL • \(pib.noPib)", keys: ["pl", "inv", "packing", "invoice"])
+                    DokapPillButton(title: "INV/PL", icon: "list.bullet.rectangle", available: resolvePlUrl() != nil, colors: colors) {
+                        openResolvedDoc(title: "INV / PL • \(pib.noPib)", url: resolvePlUrl())
                     }
-                    DokapPillButton(title: "B/L", icon: "ferry.fill", available: findDokapUrl(keys: ["bl", "awb", "bill"]) != nil, colors: colors) {
-                        openDokap(title: "B/L • \(pib.noPib)", keys: ["bl", "awb", "bill"])
+                    DokapPillButton(title: "B/L", icon: "ferry.fill", available: resolveBlUrl() != nil, colors: colors) {
+                        openResolvedDoc(title: "B/L • \(pib.noPib)", url: resolveBlUrl())
                     }
-                    DokapPillButton(title: "BAP", icon: "checkmark.seal.fill", available: findDokapUrl(keys: ["bap", "cetak_bap"]) != nil, colors: colors) {
-                        openDokap(title: "BAP • \(pib.noPib)", keys: ["bap", "cetak_bap"])
+                    DokapPillButton(title: "BAP", icon: "checkmark.seal.fill", available: resolveBapUrl() != nil, colors: colors) {
+                        openResolvedDoc(title: "BAP • \(pib.noPib)", url: resolveBapUrl())
                     }
                 }
 
@@ -1169,35 +1286,125 @@ struct HeaderPibFclPanel: View {
         }
     }
 
+    private struct LampiranRowItem: Identifiable {
+        var id: String { "\(title)_\(url.absoluteString)" }
+        let title: String
+        let subtitle: String
+        let url: URL
+    }
+
+    private var allLampiranRows: [LampiranRowItem] {
+        var rows: [LampiranRowItem] = []
+        var seen = Set<String>()
+
+        for (k, v) in dokapLinks.sorted(by: { $0.key < $1.key }) {
+            let absStr = SiapApiClient.shared.absolutizeSiap3(v)
+            if let u = URL(string: absStr), seen.insert(u.absoluteString).inserted {
+                rows.append(LampiranRowItem(title: k, subtitle: "SIAP FB Dokap", url: u))
+            }
+        }
+        for att in siap3Attachments {
+            if let u = URL(string: att.fileUrl), seen.insert(u.absoluteString).inserted {
+                let sub = att.tglUpload.isEmpty ? att.jenisDokumen : "\(att.jenisDokumen) • \(att.tglUpload)"
+                rows.append(LampiranRowItem(title: att.namaDokumen, subtitle: sub, url: u))
+            }
+        }
+        if let bap = bapUrl, let u = URL(string: bap), seen.insert(u.absoluteString).inserted {
+            rows.append(LampiranRowItem(title: "BAP Pemeriksaan (Cetak BAP)", subtitle: "SIAP 3.0", url: u))
+        }
+        return rows
+    }
+
     private func loadDetails() async {
         isLoadingContainers = true
-        defer { isLoadingContainers = false }
         async let cTask: [ContainerItem] = (try? await SiapApiClient.shared.fetchContainers(kodeTiket: pib.kodeTiket)) ?? []
         async let dTask: [String: String] = (try? await SiapApiClient.shared.fetchDokumen(kodeTiket: pib.kodeTiket)) ?? [:]
         containers = await cTask
         dokapLinks = await dTask
+        isLoadingContainers = false
+        await loadAttachments()
     }
 
-    private func findDokapUrl(keys: [String]) -> URL? {
+    private func loadAttachments() async {
+        guard let sess = app.session else { return }
+        isLoadingAttachments = true
+        attachmentNote = nil
+        defer { isLoadingAttachments = false }
+        do {
+            async let attTask = SiapApiClient.shared.fetchAttachmentsForPib(
+                username: sess.username,
+                password: sess.password,
+                fallbackEmail: sess.usernameEmail,
+                noPib: pib.noPib
+            )
+            async let bapTask = SiapApiClient.shared.fetchBapUrlForPib(
+                username: sess.username,
+                password: sess.password,
+                fallbackEmail: sess.usernameEmail,
+                noPib: pib.noPib
+            )
+            siap3Attachments = try await attTask
+            bapUrl = try? await bapTask
+        } catch {
+            attachmentNote = error.localizedDescription
+        }
+    }
+
+    private func resolvePibUrl() -> URL? {
+        if let u = findInDokap(keys: ["pib"]) { return u }
+        if let att = siap3Attachments.first(where: { $0.namaDokumen.uppercased().contains("PIB") || $0.jenisDokumen.uppercased().contains("PIB") }),
+           let u = URL(string: att.fileUrl) { return u }
+        for (k, v) in dokapLinks {
+            let ku = k.uppercased()
+            if !ku.contains("B/L") && !ku.contains("BILL") && !ku.contains("LADING"),
+               let u = URL(string: SiapApiClient.shared.absolutizeSiap3(v)) { return u }
+        }
+        return nil
+    }
+
+    private func resolvePlUrl() -> URL? {
+        if let u = findInDokap(keys: ["packing", "pl", "inv", "invoice"]) { return u }
+        if let att = siap3Attachments.first(where: {
+            let t = ($0.namaDokumen + " " + $0.jenisDokumen).uppercased()
+            return t.contains("PACKING") || t.contains("INVOICE") || t.contains("INV") || t.contains("PL")
+        }), let u = URL(string: att.fileUrl) { return u }
+        return nil
+    }
+
+    private func resolveBlUrl() -> URL? {
+        if let u = findInDokap(keys: ["b/l", "bill", "lading", "awb", "bl"]) { return u }
+        if let att = siap3Attachments.first(where: {
+            let t = ($0.namaDokumen + " " + $0.jenisDokumen).uppercased()
+            let tokens = t.components(separatedBy: CharacterSet.alphanumerics.inverted)
+            return t.contains("B/L") || t.contains("BILL") || t.contains("LADING") || t.contains("AWB") || t.contains("AIRWAY") || tokens.contains("BL")
+        }), let u = URL(string: att.fileUrl) { return u }
+        return nil
+    }
+
+    private func resolveBapUrl() -> URL? {
+        if let u = findInDokap(keys: ["bap", "cetak_bap"]) { return u }
+        if let bap = bapUrl, let u = URL(string: bap) { return u }
+        return nil
+    }
+
+    private func findInDokap(keys: [String]) -> URL? {
         for (k, v) in dokapLinks {
             let kl = k.lowercased()
-            let trimmed = v.trimmingCharacters(in: .whitespacesAndNewlines)
-            if trimmed.isEmpty || trimmed == "-" || trimmed == "null" { continue }
             if keys.contains(where: { kl.contains($0) }) {
-                if trimmed.hasPrefix("http"), let u = URL(string: trimmed) { return u }
-                if let u = URL(string: "https://bcpriok.net/\(trimmed.trimmingCharacters(in: CharacterSet(charactersIn: "/")))") {
-                    return u
-                }
+                let absStr = SiapApiClient.shared.absolutizeSiap3(v)
+                if let u = URL(string: absStr) { return u }
             }
         }
         return nil
     }
 
-    private func openDokap(title: String, keys: [String]) {
-        if let url = findDokapUrl(keys: keys) {
+    private func openResolvedDoc(title: String, url: URL?) {
+        if let url {
             app.activeDokap = DokapTarget(title: title, url: url)
+        } else if isLoadingAttachments {
+            app.showToast("Sedang mengambil lampiran dari SIAP 3.0...")
         } else {
-            app.showToast("Link \(title) belum tersedia dari server")
+            app.showToast("\(title) belum tersedia — cek daftar Lampiran Dokumen di atas")
         }
     }
 
@@ -1879,35 +2086,75 @@ struct TtdPjModalSheet: View {
     }
 }
 
-// MARK: - In-App Dokap Viewer (PIB / INV-PL / B/L / BAP)
+// MARK: - Native Authenticated Dokap / Lampiran PDF Viewer (Matches Android DocumentViewerKt)
 
 struct DokapViewerPanel: View {
+    @EnvironmentObject var app: AppState
     let target: DokapTarget
     let colors: SiapColors
 
+    @State private var isLoading = true
+    @State private var errorMsg: String?
+    @State private var downloaded: SiapApiClient.DownloadedDocument?
+    @State private var rotation = 0
+    @State private var showShare = false
+
     var body: some View {
         VStack(spacing: 0) {
-            HStack {
-                Text(target.url.absoluteString)
-                    .font(.system(size: 11, design: .monospaced))
-                    .foregroundStyle(colors.textHint)
-                    .lineLimit(1)
-                Spacer()
+            // Document Toolbar (Rotate 90°, Reload, Share/Save PDF)
+            HStack(spacing: 8) {
                 Button {
-                    UIApplication.shared.open(target.url)
+                    rotation = (rotation + 90) % 360
                 } label: {
                     HStack(spacing: 4) {
-                        Image(systemName: "safari.fill")
-                        Text("Safari")
+                        Image(systemName: "rotate.right")
+                        Text("Putar")
                     }
                     .font(.system(size: 12, weight: .bold))
                     .padding(.horizontal, 10)
-                    .padding(.vertical, 5)
-                    .background(colors.primaryContainer)
-                    .foregroundStyle(colors.onPrimaryContainer)
+                    .padding(.vertical, 6)
+                    .background(colors.surfaceElevated)
+                    .foregroundStyle(colors.textPrimary)
                     .clipShape(Capsule())
                 }
                 .buttonStyle(.plain)
+                .disabled(downloaded == nil)
+
+                Button {
+                    Task { await loadDocument() }
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "arrow.clockwise")
+                        Text("Muat Ulang")
+                    }
+                    .font(.system(size: 12, weight: .bold))
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(colors.surfaceElevated)
+                    .foregroundStyle(colors.textPrimary)
+                    .clipShape(Capsule())
+                }
+                .buttonStyle(.plain)
+
+                Spacer()
+
+                if downloaded != nil {
+                    Button {
+                        showShare = true
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: "square.and.arrow.up")
+                            Text("Bagikan")
+                        }
+                        .font(.system(size: 12, weight: .bold))
+                        .padding(.horizontal, 11)
+                        .padding(.vertical, 6)
+                        .background(colors.primaryAction)
+                        .foregroundStyle(colors.onPrimaryAction)
+                        .clipShape(Capsule())
+                    }
+                    .buttonStyle(.plain)
+                }
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
@@ -1916,8 +2163,87 @@ struct DokapViewerPanel: View {
                 Rectangle().fill(colors.divider).frame(height: 0.75)
             }
 
-            SiapWebView(url: target.url)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            // Document Content
+            ZStack {
+                colors.backdrop.ignoresSafeArea()
+
+                if isLoading {
+                    VStack(spacing: 12) {
+                        ProgressView().tint(colors.primaryAction).scaleEffect(1.2)
+                        Text("Mengunduh \(target.title)...")
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundStyle(colors.textPrimary)
+                        Text("Menggunakan sesi terautentikasi SIAP 3.0")
+                            .font(.system(size: 12))
+                            .foregroundStyle(colors.textHint)
+                    }
+                } else if let errorMsg {
+                    VStack(spacing: 14) {
+                        Image(systemName: "doc.badge.exclamationmark")
+                            .font(.system(size: 40))
+                            .foregroundStyle(colors.danger)
+                        Text("Gagal Memuat Dokumen")
+                            .font(.system(size: 16, weight: .bold))
+                            .foregroundStyle(colors.textPrimary)
+                        Text(errorMsg)
+                            .font(.system(size: 13))
+                            .foregroundStyle(colors.textSecondary)
+                            .multilineTextAlignment(.center)
+                            .padding(.horizontal, 24)
+                        HStack(spacing: 10) {
+                            SiapFilledButton("Coba Lagi", icon: "arrow.clockwise", bg: colors.primaryAction, fg: colors.onPrimaryAction) {
+                                Task { await loadDocument() }
+                            }
+                            .frame(width: 140)
+                            SiapOutlinedButton("Buka Safari", icon: "safari", color: colors.secondary) {
+                                UIApplication.shared.open(target.url)
+                            }
+                            .frame(width: 140)
+                        }
+                    }
+                } else if let doc = downloaded {
+                    if doc.isImage, let img = UIImage(contentsOfFile: doc.localURL.path) {
+                        ScrollView([.horizontal, .vertical]) {
+                            Image(uiImage: img)
+                                .resizable()
+                                .scaledToFit()
+                                .rotationEffect(.degrees(Double(rotation)))
+                                .padding()
+                        }
+                    } else {
+                        SiapPdfKitView(url: doc.localURL, rotationDegrees: rotation)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .task(id: target.id) {
+            await loadDocument()
+        }
+        .sheet(isPresented: $showShare) {
+            if let url = downloaded?.localURL {
+                SiapShareSheet(items: [url])
+            }
+        }
+    }
+
+    private func loadDocument() async {
+        isLoading = true
+        errorMsg = nil
+        defer { isLoading = false }
+        let user = app.session?.username ?? ""
+        let pass = app.session?.password ?? ""
+        let email = app.session?.usernameEmail ?? ""
+        do {
+            downloaded = try await SiapApiClient.shared.downloadDocumentFile(
+                urlStr: target.url.absoluteString,
+                username: user,
+                password: pass,
+                fallbackEmail: email
+            )
+        } catch {
+            errorMsg = error.localizedDescription
         }
     }
 }
@@ -2149,7 +2475,7 @@ struct LorongTabView: View {
     }
 }
 
-// MARK: - Tab 3: Browse PIB & Pendok MK
+// MARK: - Tab 3: Browse Pendok MK (Lampiran Dokumen) & Browse PIB
 
 struct BrowseTabView: View {
     @EnvironmentObject var app: AppState
@@ -2158,31 +2484,50 @@ struct BrowseTabView: View {
     @State private var mode = 0
     @State private var query = ""
     @State private var isLoading = false
+    @State private var errorMsg: String?
     @State private var pibResults: [PibDocument] = []
-    @State private var pendokResults: [PendokItem] = []
+    @State private var pendokResults: [PendokBrowseItem] = []
+    @State private var expandedActionId: String?
+    @State private var attachmentsByKode: [String: [PendokDocumentAttachment]] = [:]
+    @State private var loadingKode: String?
 
     var body: some View {
         ScrollView {
             VStack(spacing: 12) {
                 // Segmented Pill Switcher
                 HStack(spacing: 6) {
-                    BrowseSegmentPill(title: "Browse PIB", active: mode == 0, colors: colors) { mode = 0 }
-                    BrowseSegmentPill(title: "Pendok MK (SIAP 3.0)", active: mode == 1, colors: colors) { mode = 1 }
+                    BrowseSegmentPill(title: "Pendok MK (Lampiran)", active: mode == 0, colors: colors) {
+                        mode = 0
+                        if pendokResults.isEmpty { Task { await search() } }
+                    }
+                    BrowseSegmentPill(title: "Browse PIB", active: mode == 1, colors: colors) {
+                        mode = 1
+                    }
                 }
                 .padding(.horizontal, 12)
                 .padding(.top, 10)
 
                 // Search Row
                 HStack(spacing: 8) {
-                    TextField(mode == 0 ? "Masukkan No. PIB..." : "Cari PIB / Importir Pendok...", text: $query)
-                        .font(.system(size: 13.5))
-                        .foregroundStyle(colors.textPrimary)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                        .padding(11)
-                        .background(colors.surface)
-                        .overlay(RoundedRectangle(cornerRadius: 11, style: .continuous).stroke(colors.cardBorder, lineWidth: 1))
-                        .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
+                    HStack(spacing: 6) {
+                        Image(systemName: "magnifyingglass").foregroundStyle(colors.textHint)
+                        TextField(mode == 0 ? "Cari No PIB / Importir / Aju..." : "Masukkan No. PIB...", text: $query)
+                            .font(.system(size: 13.5))
+                            .foregroundStyle(colors.textPrimary)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                            .onSubmit { Task { await search() } }
+                        if !query.isEmpty {
+                            Button { query = "" } label: {
+                                Image(systemName: "xmark.circle.fill").foregroundStyle(colors.textHint)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .padding(11)
+                    .background(colors.surface)
+                    .overlay(RoundedRectangle(cornerRadius: 11, style: .continuous).stroke(colors.cardBorder, lineWidth: 1))
+                    .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
 
                     Button {
                         Task { await search() }
@@ -2203,9 +2548,72 @@ struct BrowseTabView: View {
                 }
                 .padding(.horizontal, 12)
 
+                if let errorMsg {
+                    HStack(spacing: 8) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                        Text(errorMsg).font(.system(size: 12.5))
+                    }
+                    .foregroundStyle(colors.danger)
+                    .padding(11)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(colors.danger.opacity(0.14))
+                    .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
+                    .padding(.horizontal, 12)
+                }
+
                 if isLoading {
-                    ProgressView("Mencari data...").tint(colors.primaryAction).padding(.top, 30)
+                    ProgressView(mode == 0 ? "Memuat Pendok MK SIAP 3.0..." : "Mencari PIB...")
+                        .tint(colors.primaryAction)
+                        .padding(.top, 30)
                 } else if mode == 0 {
+                    if pendokResults.isEmpty {
+                        VStack(spacing: 10) {
+                            Image(systemName: "doc.text.magnifyingglass")
+                                .font(.system(size: 36))
+                                .foregroundStyle(colors.textHint)
+                            Text("Belum ada data Pendok MK ditampilkan.")
+                                .font(.system(size: 14, weight: .bold))
+                                .foregroundStyle(colors.textPrimary)
+                            SiapOutlinedButton("Muat Data Pendok MK", icon: "arrow.clockwise", color: colors.primaryAction) {
+                                Task { await search() }
+                            }
+                            .frame(maxWidth: 220)
+                        }
+                        .padding(24)
+                        .frame(maxWidth: .infinity)
+                        .background(colors.surface)
+                        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                        .padding(.horizontal, 12)
+                    } else {
+                        ForEach(pendokResults) { item in
+                            let isExpanded = expandedActionId == item.actionId
+                            let atts = attachmentsByKode[item.actionId]
+                            PendokBrowseCardView(
+                                item: item,
+                                colors: colors,
+                                isExpanded: isExpanded,
+                                isLoadingAttachments: loadingKode == item.actionId,
+                                attachments: atts,
+                                onToggleAttachments: {
+                                    if isExpanded {
+                                        expandedActionId = nil
+                                    } else {
+                                        expandedActionId = item.actionId
+                                        if atts == nil {
+                                            Task { await loadAttachments(for: item) }
+                                        }
+                                    }
+                                },
+                                onOpenAttachment: { att in
+                                    if let u = URL(string: att.fileUrl) {
+                                        app.activeDokap = DokapTarget(title: "\(att.namaDokumen) • PIB \(item.noPib)", url: u)
+                                    }
+                                }
+                            )
+                            .padding(.horizontal, 12)
+                        }
+                    }
+                } else {
                     if pibResults.isEmpty {
                         Text("Masukkan nomor PIB lalu tekan Cari.")
                             .font(.system(size: 13))
@@ -2225,56 +2633,204 @@ struct BrowseTabView: View {
                             .padding(.horizontal, 12)
                         }
                     }
-                } else {
-                    if pendokResults.isEmpty {
-                        Text("Cari data Pendok MK SIAP 3.0.")
-                            .font(.system(size: 13))
-                            .foregroundStyle(colors.textHint)
-                            .padding(.top, 30)
-                    } else {
-                        ForEach(pendokResults) { item in
-                            VStack(alignment: .leading, spacing: 6) {
-                                HStack {
-                                    Text(item.title)
-                                        .font(.system(size: 14, weight: .bold))
-                                        .foregroundStyle(colors.textPrimary)
-                                    Spacer()
-                                    if !item.status.isEmpty {
-                                        SiapStatusChip(text: item.status, colors: colors)
-                                    }
-                                }
-                                Text(item.subtitle)
-                                    .font(.system(size: 12))
-                                    .foregroundStyle(colors.textSecondary)
-                            }
-                            .padding(13)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .background(colors.surface)
-                            .overlay(RoundedRectangle(cornerRadius: 13, style: .continuous).stroke(colors.cardBorder, lineWidth: 1))
-                            .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
-                            .padding(.horizontal, 12)
-                        }
-                    }
                 }
             }
             .padding(.bottom, 18)
+        }
+        .task {
+            if mode == 0 && pendokResults.isEmpty && app.session != nil {
+                await search()
+            }
         }
     }
 
     private func search() async {
         guard let sess = app.session else { return }
         isLoading = true
+        errorMsg = nil
         defer { isLoading = false }
         let q = query.trimmingCharacters(in: .whitespacesAndNewlines)
         do {
             if mode == 0 {
-                pibResults = try await SiapApiClient.shared.browsePibData(nip: sess.nip, noPib: q)
+                pendokResults = try await SiapApiClient.shared.browsePendok(
+                    username: sess.username,
+                    password: sess.password,
+                    fallbackEmail: sess.usernameEmail,
+                    query: q,
+                    start: 0,
+                    length: 30
+                )
             } else {
-                pendokResults = try await SiapApiClient.shared.browsePendok(username: sess.username, password: sess.password, query: q)
+                pibResults = try await SiapApiClient.shared.browsePibData(nip: sess.nip, noPib: q)
             }
         } catch {
-            app.showToast("Gagal mencari: \(error.localizedDescription)")
+            errorMsg = error.localizedDescription
+            app.showToast("Gagal memuat: \(error.localizedDescription)")
         }
+    }
+
+    private func loadAttachments(for item: PendokBrowseItem) async {
+        guard let sess = app.session else { return }
+        loadingKode = item.actionId
+        defer { if loadingKode == item.actionId { loadingKode = nil } }
+        do {
+            let list = try await SiapApiClient.shared.fetchPendokAttachments(
+                username: sess.username,
+                password: sess.password,
+                fallbackEmail: sess.usernameEmail,
+                kodePelayanan: item.actionId
+            )
+            attachmentsByKode[item.actionId] = list
+            if list.isEmpty {
+                app.showToast("Belum ada lampiran PDF di SIAP 3.0 untuk PIB \(item.noPib)")
+            }
+        } catch {
+            app.showToast("Gagal ambil lampiran: \(error.localizedDescription)")
+        }
+    }
+}
+
+struct PendokBrowseCardView: View {
+    let item: PendokBrowseItem
+    let colors: SiapColors
+    let isExpanded: Bool
+    let isLoadingAttachments: Bool
+    let attachments: [PendokDocumentAttachment]?
+    let onToggleAttachments: () -> Void
+    let onOpenAttachment: (PendokDocumentAttachment) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .top, spacing: 8) {
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 6) {
+                        Text("PIB \(item.noPib)")
+                            .font(.system(size: 15.5, weight: .heavy, design: .rounded))
+                            .foregroundStyle(colors.textPrimary)
+                        if !item.jalur.isEmpty && item.jalur != "-" {
+                            Text(item.jalur)
+                                .font(.system(size: 10.5, weight: .bold))
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(colors.primaryContainer)
+                                .foregroundStyle(colors.onPrimaryContainer)
+                                .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+                        }
+                    }
+                    if !item.tglPib.isEmpty {
+                        Text(item.tglPib)
+                            .font(.system(size: 11.5))
+                            .foregroundStyle(colors.textHint)
+                    }
+                }
+                Spacer()
+                SiapStatusChip(text: item.status, colors: colors)
+            }
+
+            if !item.namaImportir.isEmpty {
+                Text(item.namaImportir)
+                    .font(.system(size: 13.5, weight: .bold))
+                    .foregroundStyle(colors.textPrimary)
+                    .lineLimit(2)
+            }
+
+            HStack(spacing: 8) {
+                if !item.pfpd.isEmpty && item.pfpd != "-" {
+                    SiapMetaTag(icon: "person.fill", text: item.pfpd, bg: colors.surfaceElevated, fg: colors.textSecondary)
+                }
+                if !item.actionId.isEmpty {
+                    SiapMetaTag(icon: "number", text: "Kode \(item.actionId)", bg: colors.surfaceElevated, fg: colors.textHint)
+                }
+            }
+
+            if item.isDitolak && !item.alasanPenolakan.isEmpty {
+                Text(item.alasanPenolakan)
+                    .font(.system(size: 11.5, weight: .semibold))
+                    .foregroundStyle(colors.danger)
+                    .padding(8)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(colors.danger.opacity(0.12))
+                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            }
+
+            Button(action: onToggleAttachments) {
+                HStack(spacing: 6) {
+                    Image(systemName: "paperclip")
+                    Text(isExpanded ? "Tutup Lampiran Dokumen" : "Lihat Lampiran Dokumen")
+                    Spacer()
+                    if isLoadingAttachments {
+                        ProgressView().tint(colors.onPrimaryAction).scaleEffect(0.8)
+                    } else {
+                        Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
+                    }
+                }
+                .font(.system(size: 12.5, weight: .bold))
+                .padding(.horizontal, 12)
+                .padding(.vertical, 9)
+                .background(isExpanded ? colors.primaryContainer : colors.primaryAction)
+                .foregroundStyle(isExpanded ? colors.onPrimaryContainer : colors.onPrimaryAction)
+                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            }
+            .buttonStyle(.plain)
+
+            if isExpanded {
+                if isLoadingAttachments {
+                    HStack(spacing: 8) {
+                        ProgressView().tint(colors.primaryAction)
+                        Text("Mengambil daftar lampiran dokumen...")
+                            .font(.system(size: 12))
+                            .foregroundStyle(colors.textSecondary)
+                    }
+                    .padding(.vertical, 6)
+                } else if let list = attachments, !list.isEmpty {
+                    VStack(spacing: 6) {
+                        ForEach(list) { att in
+                            Button {
+                                onOpenAttachment(att)
+                            } label: {
+                                HStack(spacing: 8) {
+                                    Image(systemName: "doc.richtext.fill")
+                                        .foregroundStyle(colors.secondary)
+                                    VStack(alignment: .leading, spacing: 1) {
+                                        Text(att.namaDokumen)
+                                            .font(.system(size: 12.5, weight: .bold))
+                                            .foregroundStyle(colors.textPrimary)
+                                            .lineLimit(2)
+                                        if !att.tglUpload.isEmpty {
+                                            Text(att.tglUpload)
+                                                .font(.system(size: 10.5))
+                                                .foregroundStyle(colors.textHint)
+                                        }
+                                    }
+                                    Spacer()
+                                    Text("Buka PDF")
+                                        .font(.system(size: 11, weight: .bold))
+                                        .padding(.horizontal, 9)
+                                        .padding(.vertical, 5)
+                                        .background(colors.secondary.opacity(0.18))
+                                        .foregroundStyle(colors.secondary)
+                                        .clipShape(Capsule())
+                                }
+                                .padding(9)
+                                .background(colors.surfaceElevated)
+                                .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .padding(.top, 4)
+                } else {
+                    Text("Tidak ada file lampiran untuk dokumen ini.")
+                        .font(.system(size: 12))
+                        .foregroundStyle(colors.textHint)
+                        .padding(.vertical, 4)
+                }
+            }
+        }
+        .padding(13)
+        .background(colors.surface)
+        .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).stroke(colors.cardBorder, lineWidth: 1))
+        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
     }
 }
 
@@ -2496,6 +3052,9 @@ struct UserTabView: View {
     @State private var isTestingDiag = false
     @State private var diagResults: [(String, Bool, String)] = []
     @State private var showLogoutConfirm = false
+    @State private var siap3User = UserDefaults.standard.string(forKey: "siapneo_siap3_user") ?? ""
+    @State private var siap3Pass = UserDefaults.standard.string(forKey: "siapneo_siap3_pass") ?? ""
+    @State private var isTestingSiap3 = false
 
     var body: some View {
         ScrollView {
@@ -2635,6 +3194,72 @@ struct UserTabView: View {
                 .clipShape(RoundedRectangle(cornerRadius: 15, style: .continuous))
                 .padding(.horizontal, 12)
 
+                // Kredensial SIAP 3.0 (Lampiran Dokumen & BAP)
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Kredensial SIAP 3.0 (Lampiran & BAP)")
+                        .font(.system(size: 14.5, weight: .bold))
+                        .foregroundStyle(colors.textPrimary)
+                    Text("Kosongkan jika sama dengan akun login SIAP NEO. Isi manual hanya jika akun web SIAP 3.0 berbeda.")
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(colors.textHint)
+
+                    TextField("Username / NIP SIAP 3.0 (opsional)", text: $siap3User)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .font(.system(size: 13.5))
+                        .foregroundStyle(colors.textPrimary)
+                        .padding(11)
+                        .background(colors.surfaceElevated)
+                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+
+                    SecureField("Password SIAP 3.0 (opsional)", text: $siap3Pass)
+                        .font(.system(size: 13.5))
+                        .foregroundStyle(colors.textPrimary)
+                        .padding(11)
+                        .background(colors.surfaceElevated)
+                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+
+                    HStack(spacing: 8) {
+                        SiapOutlinedButton("Simpan", icon: "checkmark", color: colors.secondary) {
+                            UserDefaults.standard.set(siap3User.trimmingCharacters(in: .whitespacesAndNewlines), forKey: "siapneo_siap3_user")
+                            UserDefaults.standard.set(siap3Pass, forKey: "siapneo_siap3_pass")
+                            SiapApiClient.shared.invalidateSiap3Session()
+                            app.showToast("Kredensial SIAP 3.0 disimpan")
+                        }
+                        SiapFilledButton(
+                            isTestingSiap3 ? "Menguji..." : "Tes Login SIAP 3.0",
+                            icon: "key.fill",
+                            bg: colors.primaryAction,
+                            fg: colors.onPrimaryAction,
+                            isLoading: isTestingSiap3
+                        ) {
+                            UserDefaults.standard.set(siap3User.trimmingCharacters(in: .whitespacesAndNewlines), forKey: "siapneo_siap3_user")
+                            UserDefaults.standard.set(siap3Pass, forKey: "siapneo_siap3_pass")
+                            Task {
+                                isTestingSiap3 = true
+                                defer { isTestingSiap3 = false }
+                                do {
+                                    try await SiapApiClient.shared.ensureSiap3Login(
+                                        username: app.session?.username ?? "",
+                                        password: app.session?.password ?? "",
+                                        fallbackEmail: app.session?.usernameEmail ?? "",
+                                        force: true
+                                    )
+                                    app.showToast("Login SIAP 3.0 Berhasil! Lampiran siap dibuka.")
+                                } catch {
+                                    app.showToast("SIAP 3.0 gagal: \(error.localizedDescription)")
+                                }
+                            }
+                        }
+                        .disabled(isTestingSiap3)
+                    }
+                }
+                .padding(14)
+                .background(colors.surface)
+                .overlay(RoundedRectangle(cornerRadius: 15, style: .continuous).stroke(colors.cardBorder, lineWidth: 1))
+                .clipShape(RoundedRectangle(cornerRadius: 15, style: .continuous))
+                .padding(.horizontal, 12)
+
                 // Diagnostik Server Card
                 VStack(alignment: .leading, spacing: 10) {
                     HStack {
@@ -2690,7 +3315,7 @@ struct UserTabView: View {
                 }
                 .padding(.horizontal, 12)
 
-                Text("SIAP NEO iOS Native v1.19.2 • KPU BC Tipe A Tanjung Priok")
+                Text("SIAP NEO iOS Native v1.19.3 • KPU BC Tipe A Tanjung Priok")
                     .font(.system(size: 11))
                     .foregroundStyle(colors.textHint)
                     .padding(.bottom, 14)
