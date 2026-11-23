@@ -23,10 +23,11 @@ enum PrinterConnectionMode: String, CaseIterable, Identifiable, Codable {
 
 struct PrinterConnectionConfig: Codable, Equatable {
     static let defaultPort = 1234
+    static let defaultFunnelUrl = "https://fqrbc.taile81f15.ts.net"
     static let storageKey = "siapneo_ios_printer_config_v1"
 
     var mode: PrinterConnectionMode = .auto
-    var funnelUrl: String = ""
+    var funnelUrl: String = defaultFunnelUrl
     var tailscaleIp: String = ""
     var lanIp: String = ""
     var port: Int = defaultPort
@@ -40,8 +41,12 @@ struct PrinterConnectionConfig: Codable, Equatable {
 
     static func load() -> PrinterConnectionConfig {
         guard let data = UserDefaults.standard.data(forKey: storageKey),
-              let cfg = try? JSONDecoder().decode(PrinterConnectionConfig.self, from: data) else {
+              var cfg = try? JSONDecoder().decode(PrinterConnectionConfig.self, from: data) else {
             return PrinterConnectionConfig()
+        }
+        // Match Android SessionManager.getPrinterConfig(): fallback to DEFAULT_PRINTER_SERVER_URL if blank
+        if !cfg.isConfigured {
+            cfg.funnelUrl = defaultFunnelUrl
         }
         return cfg
     }
@@ -74,9 +79,10 @@ struct PrinterConnectionConfig: Codable, Equatable {
         case .lan:
             append(.lan, normLan)
         case .auto:
-            append(.lan, normLan)
-            append(.tailscale, normTs)
+            // Exact Android PrinterConnectionConfig.candidateBaseUrls() priority: FUNNEL -> TAILSCALE -> LAN
             append(.funnel, normFunnel)
+            append(.tailscale, normTs)
+            append(.lan, normLan)
         }
         return out
     }
@@ -213,19 +219,25 @@ final class SiapPrinterApiClient {
     }
 
     func ping(baseUrl: String) async -> Bool {
-        guard let url = URL(string: "\(baseUrl)/") else { return false }
-        var req = URLRequest(url: url)
-        req.httpMethod = "GET"
-        do {
-            let (data, resp) = try await probeSession.data(for: req)
-            guard let http = resp as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
-                return false
+        // Exact Android PrinterApiClient.ping(): GET {baseUrl}/ping first, fallback to {baseUrl}/
+        for suffix in ["/ping", "/"] {
+            guard let url = URL(string: "\(baseUrl)\(suffix)") else { continue }
+            var req = URLRequest(url: url)
+            req.httpMethod = "GET"
+            do {
+                let (data, resp) = try await probeSession.data(for: req)
+                guard let http = resp as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
+                    continue
+                }
+                let body = String(data: data, encoding: .utf8) ?? ""
+                if body.localizedCaseInsensitiveContains("SIAP Print") || (suffix == "/ping" && http.statusCode == 200) {
+                    return true
+                }
+            } catch {
+                continue
             }
-            let body = String(data: data, encoding: .utf8) ?? ""
-            return body.localizedCaseInsensitiveContains("SIAP Print") || http.statusCode == 200
-        } catch {
-            return false
         }
+        return false
     }
 
     func resolveReachableBaseUrl(config: PrinterConnectionConfig) async throws -> String {
@@ -571,6 +583,12 @@ struct BapPrintSheet: View {
                     Text("\(url)\(serverInfo?.version.isEmpty == false ? " • v\(serverInfo!.version)" : "")")
                         .font(.system(size: 11.5, design: .monospaced))
                         .foregroundStyle(colors.textSecondary)
+                    if let curPr = printers.first(where: { $0.name == selectedPrinter }) ?? printers.first,
+                       let desc = curPr.statusDescription, !desc.isEmpty {
+                        Text(desc)
+                            .font(.system(size: 11.5, weight: .semibold))
+                            .foregroundStyle((curPr.isOffline == true) ? colors.danger : colors.success)
+                    }
                 } else if let err = probeError {
                     Text(err)
                         .font(.system(size: 12))
@@ -891,8 +909,8 @@ struct PrinterSettingsSheet: View {
                         }
 
                         VStack(alignment: .leading, spacing: 4) {
-                            Text("Tailscale Funnel URL (HTTPS, opsional)").font(.system(size: 11.5)).foregroundStyle(colors.textHint)
-                            TextField("https://nama-pc.tailxxxx.ts.net", text: $config.funnelUrl)
+                            Text("Tailscale Funnel URL (Default Android: https://fqrbc.taile81f15.ts.net)").font(.system(size: 11.5)).foregroundStyle(colors.textHint)
+                            TextField("https://fqrbc.taile81f15.ts.net", text: $config.funnelUrl)
                                 .keyboardType(.URL)
                                 .textInputAutocapitalization(.never)
                                 .autocorrectionDisabled()
@@ -953,10 +971,25 @@ struct PrinterSettingsSheet: View {
                                 fg: colors.onPrimaryAction
                             ) {
                                 config.port = Int(portText) ?? PrinterConnectionConfig.defaultPort
+                                if !config.isConfigured {
+                                    config.funnelUrl = PrinterConnectionConfig.defaultFunnelUrl
+                                }
                                 config.save()
                                 app.showToast("Pengaturan SIAP Print disimpan")
                                 dismiss()
                             }
+                        }
+
+                        SiapOutlinedButton(
+                            "Reset ke Server Default Android (FQRBC)",
+                            icon: "arrow.counterclockwise",
+                            color: SiapColors.brandAmber,
+                            bg: colors.surfaceElevated
+                        ) {
+                            config = PrinterConnectionConfig()
+                            portText = "\(PrinterConnectionConfig.defaultPort)"
+                            config.save()
+                            Task { await testConnection() }
                         }
                     }
                     .padding(14)
