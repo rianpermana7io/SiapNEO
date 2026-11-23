@@ -95,6 +95,49 @@ struct SiapMainShell: View {
         VStack(spacing: 0) {
             SiapTopAppBar(colors: colors)
 
+            if let upd = app.availableUpdate {
+                HStack(spacing: 8) {
+                    Image(systemName: "arrow.down.circle.fill")
+                        .foregroundStyle(SiapColors.brandAmber)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text("Update SIAP NEO v\(upd.remoteVersion) tersedia!")
+                            .font(.system(size: 12, weight: .bold))
+                            .foregroundStyle(.white)
+                        Text("Tap Update untuk pasang otomatis via TrollStore")
+                            .font(.system(size: 10.5))
+                            .foregroundStyle(SiapColors.hintOnNavy)
+                    }
+                    Spacer()
+                    Button {
+                        app.triggerTrollStoreUpdate(upd)
+                    } label: {
+                        Text("Update")
+                            .font(.system(size: 11.5, weight: .heavy))
+                            .padding(.horizontal, 11)
+                            .padding(.vertical, 6)
+                            .background(SiapColors.brandAmber)
+                            .foregroundStyle(Color(hex: 0x0B131D))
+                            .clipShape(Capsule())
+                    }
+                    .buttonStyle(.plain)
+
+                    Button {
+                        app.availableUpdate = nil
+                    } label: {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 11, weight: .bold))
+                            .foregroundStyle(SiapColors.hintOnNavy)
+                    }
+                    .buttonStyle(.plain)
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .background(Color(hex: 0x16293B))
+                .overlay(alignment: .bottom) {
+                    Rectangle().fill(SiapColors.brandAmber.opacity(0.45)).frame(height: 1)
+                }
+            }
+
             ZStack {
                 colors.backdrop.ignoresSafeArea(edges: .bottom)
 
@@ -135,6 +178,14 @@ struct SiapMainShell: View {
             ManualPibSheet(colors: colors)
                 .environmentObject(app)
                 .preferredColorScheme(app.themeMode.preferredColorScheme)
+        }
+        .sheet(item: $app.barconSheetTarget) { target in
+            AjuBarconFormSheet(target: target, colors: colors)
+                .environmentObject(app)
+                .preferredColorScheme(app.themeMode.preferredColorScheme)
+        }
+        .task {
+            await app.checkForAppUpdate(silent: true)
         }
     }
 }

@@ -9,6 +9,19 @@ struct UploadFotoContext: Equatable {
     let containers: [ContainerItem]
 }
 
+struct BarconFormTarget: Identifiable {
+    let id = UUID()
+    let pib: PibDocument
+    let isKendalaTemuan: Bool
+    var title: String { isKendalaTemuan ? "Kendala / Temuan Pemeriksaan" : "Aju Barcon" }
+    var formUrl: URL {
+        let formId = isKendalaTemuan
+            ? "1FAIpQLSekG2MQzmbuTxR8d2CRs-QjqDoipBn8CRK2ptGRGv2jZqAZ0Q"
+            : "1FAIpQLSfqSZrmToIvHdus4wQ_8JNGY50MEjIkZirqM2CSbdVdIQ0zHA"
+        return URL(string: "https://docs.google.com/forms/d/e/\(formId)/viewform")!
+    }
+}
+
 // MARK: - App State
 
 @MainActor
@@ -31,6 +44,10 @@ final class AppState: ObservableObject {
     @Published var pendingBrowseQuery: String?
     @Published var pendingBrowseAutoExpand = false
     @Published var browseReturnToTps = false
+    @Published var availableUpdate: AppUpdateInfo?
+    @Published var isCheckingUpdate = false
+    @Published var barconSheetTarget: BarconFormTarget?
+    @Published var submittedBarconKeys: Set<String> = []
 
     // Theme & UI Density (Matches Android ThemeState)
     @Published var themeMode: SiapThemeMode {
@@ -57,6 +74,8 @@ final class AppState: ObservableObject {
         self.themeMode = SiapThemeMode(rawValue: savedTheme) ?? .system
         let savedDensity = UserDefaults.standard.string(forKey: "siapneo_ios_ui_density") ?? "STANDARD"
         self.uiDensity = SiapUiDensity(rawValue: savedDensity) ?? .standard
+        let savedBarcons = UserDefaults.standard.stringArray(forKey: "siapneo_submitted_barcons") ?? []
+        self.submittedBarconKeys = Set(savedBarcons)
 
         if let data = UserDefaults.standard.data(forKey: sessionKey),
            let saved = try? JSONDecoder().decode(UserSession.self, from: data),
@@ -117,6 +136,96 @@ final class AppState: ObservableObject {
         pendingBrowseAutoExpand = true
         pendingBrowseQuery = trimmed
         activeTab = .browse
+    }
+
+    // MARK: - Barcon, Kendala/Temuan, Quick BAP & TrollStore Auto-Update
+
+    private func barconKey(for pib: PibDocument) -> String {
+        let d = pib.noPib.filter(\.isNumber)
+        return d.isEmpty ? pib.kodeTiket : d
+    }
+
+    func isBarconSubmitted(for pib: PibDocument) -> Bool {
+        submittedBarconKeys.contains(barconKey(for: pib))
+    }
+
+    func toggleBarconSubmitted(for pib: PibDocument) {
+        let key = barconKey(for: pib)
+        if submittedBarconKeys.contains(key) {
+            submittedBarconKeys.remove(key)
+            showToast("Status Aju Barcon PIB \(pib.noPib) dibatalkan")
+        } else {
+            submittedBarconKeys.insert(key)
+            showToast("Aju Barcon PIB \(pib.noPib) ditandai sudah diajukan")
+        }
+        UserDefaults.standard.set(Array(submittedBarconKeys), forKey: "siapneo_submitted_barcons")
+    }
+
+    func openBarconForm(for pib: PibDocument) {
+        barconSheetTarget = BarconFormTarget(pib: pib, isKendalaTemuan: false)
+    }
+
+    func openKendalaTemuanForm(for pib: PibDocument) {
+        barconSheetTarget = BarconFormTarget(pib: pib, isKendalaTemuan: true)
+    }
+
+    func openBapForPib(_ pib: PibDocument) async {
+        guard let sess = session else { return }
+        showToast("Mencari dokumen BAP PIB \(pib.noPib)...")
+        if let dokap = try? await SiapApiClient.shared.fetchDokumen(kodeTiket: pib.kodeTiket) {
+            for (k, v) in dokap {
+                if k.lowercased().contains("bap") {
+                    if let u = URL(string: SiapApiClient.shared.absolutizeSiap3(v)) {
+                        activeDokap = DokapTarget(title: "BAP • PIB \(pib.noPib)", url: u)
+                        return
+                    }
+                }
+            }
+        }
+        if let bapStr = try? await SiapApiClient.shared.fetchBapUrlForPib(
+            username: sess.username,
+            password: sess.password,
+            fallbackEmail: sess.usernameEmail,
+            noPib: pib.noPib
+        ), let u = URL(string: bapStr) {
+            activeDokap = DokapTarget(title: "BAP • PIB \(pib.noPib)", url: u)
+            return
+        }
+        showToast("Dokumen BAP untuk PIB \(pib.noPib) belum tersedia di server")
+    }
+
+    var currentAppVersion: String {
+        (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "1.19.5"
+    }
+
+    var currentAppBuild: Int {
+        Int((Bundle.main.infoDictionary?["CFBundleVersion"] as? String) ?? "145") ?? 145
+    }
+
+    func checkForAppUpdate(silent: Bool) async {
+        isCheckingUpdate = true
+        defer { isCheckingUpdate = false }
+        guard let info = await SiapApiClient.shared.checkLatestReleaseUpdate() else {
+            if !silent { showToast("Gagal memeriksa pembaruan dari GitHub") }
+            return
+        }
+        if info.remoteBuild > currentAppBuild || (!info.remoteVersion.isEmpty && info.remoteVersion != currentAppVersion && info.remoteBuild >= currentAppBuild) {
+            availableUpdate = info
+            if !silent { showToast("Pembaruan v\(info.remoteVersion) (\(info.remoteBuild)) tersedia!") }
+        } else {
+            availableUpdate = nil
+            if !silent { showToast("SIAP NEO sudah versi terbaru (v\(currentAppVersion))") }
+        }
+    }
+
+    func triggerTrollStoreUpdate(_ info: AppUpdateInfo) {
+        let encoded = info.ipaDownloadUrl.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? info.ipaDownloadUrl
+        if let trollUrl = URL(string: "apple-magnifier://install?url=\(encoded)"),
+           UIApplication.shared.canOpenURL(trollUrl) {
+            UIApplication.shared.open(trollUrl)
+        } else if let directUrl = URL(string: info.ipaDownloadUrl) {
+            UIApplication.shared.open(directUrl)
+        }
     }
 
     func saveSession(_ s: UserSession) {
@@ -220,7 +329,7 @@ struct LoginView: View {
                             .font(.system(size: 13.5, weight: .medium))
                             .foregroundStyle(SiapColors.hintOnNavy)
 
-                        Text("Sistem Informasi Pemeriksaan Fisik • v1.19.4")
+                        Text("Sistem Informasi Pemeriksaan Fisik • v1.19.5")
                             .font(.system(size: 11, weight: .bold))
                             .padding(.horizontal, 12)
                             .padding(.vertical, 5)
@@ -670,6 +779,7 @@ struct HomeMetricBox: View {
 // MARK: - Authentic Android PibGridCard
 
 struct PibGridCardView: View {
+    @EnvironmentObject var app: AppState
     let doc: PibDocument
     let colors: SiapColors
     let isCompact: Bool
@@ -833,6 +943,76 @@ struct PibGridCardView: View {
                                 .padding(4)
                         }
                         .buttonStyle(.plain)
+                    }
+
+                    // Row 6: Authentic Android Selesai / Sudah BAP Action Row (Aju Barcon | Lihat BAP | Kendala)
+                    if doc.isSudahBapOrSelesai || (!doc.barcon.isEmpty && doc.barcon != "-" && doc.barcon != "0") {
+                        let barconDone = app.isBarconSubmitted(for: doc)
+                        HStack(spacing: 7) {
+                            Button {
+                                app.openBarconForm(for: doc)
+                            } label: {
+                                HStack(spacing: 4) {
+                                    Image(systemName: barconDone ? "checkmark.circle.fill" : "shippingbox.fill")
+                                        .font(.system(size: 11, weight: .bold))
+                                    Text(barconDone ? "Barcon Diajukan" : "Aju Barcon")
+                                        .font(.system(size: 11.5, weight: .bold))
+                                        .lineLimit(1)
+                                }
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 7)
+                                .padding(.horizontal, 8)
+                                .background(barconDone ? colors.success.opacity(0.18) : colors.primaryAction)
+                                .foregroundStyle(barconDone ? colors.success : colors.onPrimaryAction)
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 9, style: .continuous)
+                                        .stroke(barconDone ? colors.success.opacity(0.55) : Color.clear, lineWidth: 1)
+                                )
+                                .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+                            }
+                            .buttonStyle(.plain)
+
+                            if doc.isSudahBapOrSelesai {
+                                Button {
+                                    Task { await app.openBapForPib(doc) }
+                                } label: {
+                                    HStack(spacing: 4) {
+                                        Image(systemName: "doc.text.fill")
+                                            .font(.system(size: 11, weight: .bold))
+                                        Text("BAP")
+                                            .font(.system(size: 11.5, weight: .bold))
+                                    }
+                                    .padding(.vertical, 7)
+                                    .padding(.horizontal, 10)
+                                    .background(colors.primaryContainer)
+                                    .foregroundStyle(colors.onPrimaryContainer)
+                                    .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+                                }
+                                .buttonStyle(.plain)
+                            }
+
+                            Button {
+                                app.openKendalaTemuanForm(for: doc)
+                            } label: {
+                                HStack(spacing: 3) {
+                                    Image(systemName: "exclamationmark.bubble.fill")
+                                        .font(.system(size: 11, weight: .bold))
+                                    Text("Kendala")
+                                        .font(.system(size: 11, weight: .bold))
+                                }
+                                .padding(.vertical, 7)
+                                .padding(.horizontal, 9)
+                                .background(colors.surfaceElevated)
+                                .foregroundStyle(colors.textSecondary)
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 9, style: .continuous)
+                                        .stroke(colors.cardBorder, lineWidth: 1)
+                                )
+                                .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+                            }
+                            .buttonStyle(.plain)
+                        }
+                        .padding(.top, 2)
                     }
                 }
                 .padding(isCompact ? 11 : 13)
@@ -1009,6 +1189,29 @@ struct HeaderPibFclPanel: View {
                     .clipShape(RoundedRectangle(cornerRadius: 15, style: .continuous))
                     .padding(.horizontal, 12)
                     .padding(.top, 10)
+
+                    // Aju Barcon & Kendala/Temuan Bar (Matches Android Selesai/BAP workflow)
+                    HStack(spacing: 8) {
+                        let barconDone = app.isBarconSubmitted(for: pib)
+                        SiapFilledButton(
+                            barconDone ? "Barcon Diajukan" : "Aju Barcon",
+                            icon: barconDone ? "checkmark.circle.fill" : "shippingbox.fill",
+                            bg: barconDone ? colors.success : colors.primaryAction,
+                            fg: barconDone ? (colors.isDark ? Color(hex: 0x052E16) : .white) : colors.onPrimaryAction
+                        ) {
+                            app.openBarconForm(for: pib)
+                        }
+
+                        SiapOutlinedButton(
+                            "Kendala / Temuan",
+                            icon: "exclamationmark.bubble.fill",
+                            color: colors.secondary,
+                            bg: colors.surface
+                        ) {
+                            app.openKendalaTemuanForm(for: pib)
+                        }
+                    }
+                    .padding(.horizontal, 12)
 
                     // Container List Section (Matches Daftar Kontainer (N))
                     VStack(alignment: .leading, spacing: 10) {
@@ -1372,7 +1575,8 @@ struct HeaderPibFclPanel: View {
                 username: sess.username,
                 password: sess.password,
                 fallbackEmail: sess.usernameEmail,
-                noPib: pib.noPib
+                noPib: pib.noPib,
+                importirHint: pib.importir
             )
             async let bapTask = SiapApiClient.shared.fetchBapUrlForPib(
                 username: sess.username,
@@ -3137,7 +3341,7 @@ struct TpsTabView: View {
                                     }
                                     .buttonStyle(.plain)
 
-                                    if !item.pib.isEmpty {
+                                    if !item.pib.isEmpty || !item.importir.isEmpty {
                                         Button {
                                             lampiranSheetItem = item
                                         } label: {
@@ -3205,14 +3409,21 @@ struct TpsDocumentLampiranSheet: View {
     @State private var isLoading = true
     @State private var errorMsg: String?
     @State private var pendokMatches: [PendokBrowseItem] = []
+    @State private var selectedPendokIdx = 0
     @State private var attachments: [PendokDocumentAttachment] = []
+    @State private var siapFbDokap: [(String, URL)] = []
     @State private var bapUrl: String?
+    @State private var isSwitchingMatch = false
+
+    private var totalAttachmentCount: Int {
+        attachments.count + siapFbDokap.count + (bapUrl != nil ? 1 : 0)
+    }
 
     var body: some View {
         VStack(spacing: 0) {
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Dokumen PIB \(item.pib)")
+                    Text(item.pib.isEmpty ? item.container : "Dokumen PIB \(item.pib)")
                         .font(.system(size: 16, weight: .bold))
                         .foregroundStyle(.white)
                     Text("\(item.source) • \(item.container)")
@@ -3241,7 +3452,7 @@ struct TpsDocumentLampiranSheet: View {
                     if isLoading {
                         VStack(spacing: 12) {
                             ProgressView().tint(colors.primaryAction).scaleEffect(1.1)
-                            Text("Mengambil data Pendok MK & Lampiran PDF untuk PIB \(item.pib)...")
+                            Text("Mengambil data Pendok MK, SIAP FB & Lampiran PDF untuk PIB \(item.pib)...")
                                 .font(.system(size: 13))
                                 .foregroundStyle(colors.textSecondary)
                                 .multilineTextAlignment(.center)
@@ -3261,7 +3472,32 @@ struct TpsDocumentLampiranSheet: View {
                             .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
                         }
 
-                        if let info = pendokMatches.first {
+                        // Multi-match selector if SIAP 3.0 returned more than 1 Pendok row
+                        if pendokMatches.count > 1 {
+                            ScrollView(.horizontal, showsIndicators: false) {
+                                HStack(spacing: 6) {
+                                    ForEach(Array(pendokMatches.prefix(6).enumerated()), id: \.offset) { idx, m in
+                                        let active = idx == selectedPendokIdx
+                                        Button {
+                                            selectedPendokIdx = idx
+                                            Task { await loadAttachmentsForMatch(m) }
+                                        } label: {
+                                            Text("PIB \(m.noPib) (\(m.tglPib.isEmpty ? m.actionId : m.tglPib))")
+                                                .font(.system(size: 11.5, weight: .bold))
+                                                .padding(.horizontal, 10)
+                                                .padding(.vertical, 6)
+                                                .background(active ? colors.primaryAction : colors.surface)
+                                                .foregroundStyle(active ? colors.onPrimaryAction : colors.textSecondary)
+                                                .clipShape(Capsule())
+                                        }
+                                        .buttonStyle(.plain)
+                                    }
+                                }
+                            }
+                        }
+
+                        if selectedPendokIdx < pendokMatches.count {
+                            let info = pendokMatches[selectedPendokIdx]
                             VStack(alignment: .leading, spacing: 7) {
                                 HStack {
                                     Text("Info Pendok MK (SIAP 3.0)")
@@ -3288,20 +3524,33 @@ struct TpsDocumentLampiranSheet: View {
                             .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
                         }
 
-                        // Lampiran Dokumen List
+                        // Lampiran Dokumen List (SIAP 3.0 + SIAP FB Dokap + BAP)
                         VStack(alignment: .leading, spacing: 8) {
-                            Text("Lampiran Dokumen (\(attachments.count + (bapUrl != nil ? 1 : 0)))")
-                                .font(.system(size: 14, weight: .bold))
-                                .foregroundStyle(colors.textPrimary)
+                            HStack {
+                                Text("Lampiran Dokumen (\(totalAttachmentCount))")
+                                    .font(.system(size: 14, weight: .bold))
+                                    .foregroundStyle(colors.textPrimary)
+                                Spacer()
+                                if isSwitchingMatch {
+                                    ProgressView().tint(colors.primaryAction).scaleEffect(0.8)
+                                }
+                            }
 
-                            if attachments.isEmpty && bapUrl == nil {
-                                Text("Belum ada file lampiran PDF ditemukan di SIAP 3.0 untuk PIB \(item.pib).")
-                                    .font(.system(size: 13))
-                                    .foregroundStyle(colors.textHint)
-                                    .padding(14)
-                                    .frame(maxWidth: .infinity)
-                                    .background(colors.surface)
-                                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                            if totalAttachmentCount == 0 {
+                                VStack(spacing: 8) {
+                                    Text("Belum ada file lampiran PDF ditemukan untuk PIB \(item.pib).")
+                                        .font(.system(size: 13))
+                                        .foregroundStyle(colors.textHint)
+                                        .multilineTextAlignment(.center)
+                                    Text("Pastikan akun SIAP 3.0 di tab Akun sudah aktif atau coba cari manual di tab Browse.")
+                                        .font(.system(size: 11.5))
+                                        .foregroundStyle(colors.textSecondary)
+                                        .multilineTextAlignment(.center)
+                                }
+                                .padding(14)
+                                .frame(maxWidth: .infinity)
+                                .background(colors.surface)
+                                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                             } else {
                                 ForEach(attachments) { att in
                                     Button {
@@ -3333,6 +3582,43 @@ struct TpsDocumentLampiranSheet: View {
                                                 .padding(.vertical, 6)
                                                 .background(colors.primaryAction)
                                                 .foregroundStyle(colors.onPrimaryAction)
+                                                .clipShape(Capsule())
+                                        }
+                                        .padding(11)
+                                        .background(colors.surface)
+                                        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).stroke(colors.cardBorder, lineWidth: 1))
+                                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                                    }
+                                    .buttonStyle(.plain)
+                                }
+
+                                ForEach(siapFbDokap, id: \.1.absoluteString) { label, url in
+                                    Button {
+                                        dismiss()
+                                        app.activeDokap = DokapTarget(title: "\(label) • PIB \(item.pib)", url: url)
+                                    } label: {
+                                        HStack(spacing: 10) {
+                                            Image(systemName: "doc.fill")
+                                                .font(.system(size: 18))
+                                                .foregroundStyle(colors.secondary)
+                                                .frame(width: 34, height: 34)
+                                                .background(colors.surfaceElevated)
+                                                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                                            VStack(alignment: .leading, spacing: 2) {
+                                                Text(label)
+                                                    .font(.system(size: 13, weight: .bold))
+                                                    .foregroundStyle(colors.textPrimary)
+                                                Text("Lampiran SIAP FB")
+                                                    .font(.system(size: 11))
+                                                    .foregroundStyle(colors.textHint)
+                                            }
+                                            Spacer()
+                                            Text("Buka PDF")
+                                                .font(.system(size: 11.5, weight: .bold))
+                                                .padding(.horizontal, 10)
+                                                .padding(.vertical, 6)
+                                                .background(colors.secondary)
+                                                .foregroundStyle(colors.onSecondary)
                                                 .clipShape(Capsule())
                                         }
                                         .padding(11)
@@ -3384,7 +3670,7 @@ struct TpsDocumentLampiranSheet: View {
 
                         SiapOutlinedButton("Buka Lengkap di Tab Browse", icon: "doc.text.magnifyingglass", color: colors.secondary, bg: colors.surface) {
                             dismiss()
-                            app.searchPibInBrowse(query: item.pib, fromTps: true)
+                            app.searchPibInBrowse(query: item.pib.isEmpty ? item.importir : item.pib, fromTps: true)
                         }
                         .padding(.top, 4)
                     }
@@ -3398,46 +3684,196 @@ struct TpsDocumentLampiranSheet: View {
         }
     }
 
+    private func loadAttachmentsForMatch(_ match: PendokBrowseItem) async {
+        guard let sess = app.session, !match.actionId.isEmpty else { return }
+        isSwitchingMatch = true
+        defer { isSwitchingMatch = false }
+        if let list = try? await SiapApiClient.shared.fetchPendokAttachments(
+            username: sess.username,
+            password: sess.password,
+            fallbackEmail: sess.usernameEmail,
+            kodePelayanan: match.actionId
+        ) {
+            attachments = list
+        }
+    }
+
     private func loadLampiran() async {
         guard let sess = app.session else { return }
         isLoading = true
         errorMsg = nil
         defer { isLoading = false }
-        let digits = item.pib.filter(\.isNumber)
+
+        // 1. Query SIAP 3.0 Pendok MK with flexible PIB variants + Importir fallback
         do {
-            let found = try await SiapApiClient.shared.browsePendok(
+            let found = try await SiapApiClient.shared.searchPendokFlexible(
                 username: sess.username,
                 password: sess.password,
                 fallbackEmail: sess.usernameEmail,
-                query: digits.isEmpty ? item.pib : digits,
-                start: 0,
-                length: 15
+                noPib: item.pib,
+                importirHint: item.importir
             )
             pendokMatches = found
-            let normTarget = String(digits.drop(while: { $0 == "0" }))
-            let best = found.first(where: {
-                let d = $0.noPib.filter(\.isNumber)
-                let nd = String(d.drop(while: { $0 == "0" }))
-                return d == digits || (!normTarget.isEmpty && nd == normTarget)
-            }) ?? found.first
-
-            if let kode = best?.actionId, !kode.isEmpty {
+            selectedPendokIdx = 0
+            if let first = found.first, !first.actionId.isEmpty {
                 attachments = try await SiapApiClient.shared.fetchPendokAttachments(
                     username: sess.username,
                     password: sess.password,
                     fallbackEmail: sess.usernameEmail,
-                    kodePelayanan: kode
+                    kodePelayanan: first.actionId
                 )
             }
+        } catch {
+            errorMsg = error.localizedDescription
+        }
+
+        // 2. Also merge SIAP FB Dokap (browse_data -> get_dokumen) so documents missing from Pendok MK still appear!
+        let digits = item.pib.filter(\.isNumber)
+        if !digits.isEmpty {
+            if let fbDocs = try? await SiapApiClient.shared.browsePibData(nip: sess.nip, noPib: digits),
+               let firstFb = fbDocs.first, !firstFb.kodeTiket.isEmpty,
+               let dokMap = try? await SiapApiClient.shared.fetchDokumen(kodeTiket: firstFb.kodeTiket) {
+                let existingUrls = Set(attachments.map(\.fileUrl))
+                var extra: [(String, URL)] = []
+                for (k, v) in dokMap.sorted(by: { $0.key < $1.key }) {
+                    let absStr = SiapApiClient.shared.absolutizeSiap3(v)
+                    if !existingUrls.contains(absStr), let u = URL(string: absStr) {
+                        extra.append((k, u))
+                    }
+                }
+                siapFbDokap = extra
+            }
+            // 3. Also check BAP cetak_bap URL
             bapUrl = try? await SiapApiClient.shared.fetchBapUrlForPib(
                 username: sess.username,
                 password: sess.password,
                 fallbackEmail: sess.usernameEmail,
                 noPib: item.pib
             )
-        } catch {
-            errorMsg = error.localizedDescription
         }
+    }
+}
+
+// MARK: - Authentic Android Aju Barcon & Kendala/Temuan Sheet
+
+struct AjuBarconFormSheet: View {
+    @EnvironmentObject var app: AppState
+    @Environment(\.dismiss) private var dismiss
+    let target: BarconFormTarget
+    let colors: SiapColors
+
+    var body: some View {
+        let barconDone = app.isBarconSubmitted(for: target.pib)
+        VStack(spacing: 0) {
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(target.title)
+                        .font(.system(size: 16, weight: .bold))
+                        .foregroundStyle(.white)
+                    Text("PIB \(target.pib.noPib) • \(target.pib.importir)")
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(SiapColors.hintOnNavy)
+                        .lineLimit(1)
+                }
+                Spacer()
+                Button {
+                    UIApplication.shared.open(target.formUrl)
+                } label: {
+                    Image(systemName: "safari.fill")
+                        .font(.system(size: 15, weight: .bold))
+                        .foregroundStyle(.white)
+                        .padding(8)
+                        .background(Color.white.opacity(0.16))
+                        .clipShape(Circle())
+                }
+                .buttonStyle(.plain)
+
+                Button {
+                    dismiss()
+                } label: {
+                    Text("Tutup")
+                        .font(.system(size: 12.5, weight: .bold))
+                        .padding(.horizontal, 11)
+                        .padding(.vertical, 6)
+                        .background(Color.white.opacity(0.16))
+                        .foregroundStyle(.white)
+                        .clipShape(Capsule())
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(14)
+            .background(colors.headerGradient)
+
+            // 1-Tap Quick Copy Helper Chips for Fast Google Form Entry
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 6) {
+                    QuickCopyChip(label: "PIB: \(target.pib.noPib)", value: target.pib.noPib, colors: colors, app: app)
+                    QuickCopyChip(label: "Tgl: \(SiapCrypto.formatDisplayDate(target.pib.tglPib))", value: SiapCrypto.formatDisplayDate(target.pib.tglPib), colors: colors, app: app)
+                    QuickCopyChip(label: "TPS: \(target.pib.kodeTps)", value: target.pib.kodeTps, colors: colors, app: app)
+                    QuickCopyChip(label: "Importir", value: target.pib.importir, colors: colors, app: app)
+                    if let sess = app.session {
+                        QuickCopyChip(label: "NIP", value: sess.nip, colors: colors, app: app)
+                        QuickCopyChip(label: "Nama", value: sess.displayName, colors: colors, app: app)
+                    }
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+            }
+            .background(colors.surface)
+            .overlay(alignment: .bottom) {
+                Rectangle().fill(colors.divider).frame(height: 0.75)
+            }
+
+            SiapWebView(url: target.formUrl)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+            if !target.isKendalaTemuan {
+                HStack(spacing: 10) {
+                    SiapFilledButton(
+                        barconDone ? "✓ Sudah Diajukan (Tap untuk Batal)" : "Tandai Aju Barcon Selesai",
+                        icon: barconDone ? "checkmark.seal.fill" : "checkmark.circle",
+                        bg: barconDone ? colors.success : colors.primaryAction,
+                        fg: barconDone ? (colors.isDark ? Color(hex: 0x052E16) : .white) : colors.onPrimaryAction
+                    ) {
+                        app.toggleBarconSubmitted(for: target.pib)
+                    }
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 9)
+                .background(colors.surface)
+                .overlay(alignment: .top) {
+                    Rectangle().fill(colors.divider).frame(height: 0.75)
+                }
+            }
+        }
+    }
+}
+
+struct QuickCopyChip: View {
+    let label: String
+    let value: String
+    let colors: SiapColors
+    let app: AppState
+
+    var body: some View {
+        Button {
+            UIPasteboard.general.string = value
+            app.showToast("Disalin: \(value)")
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: "doc.on.doc")
+                    .font(.system(size: 10, weight: .bold))
+                Text(label)
+                    .font(.system(size: 11, weight: .bold))
+                    .lineLimit(1)
+            }
+            .padding(.horizontal, 9)
+            .padding(.vertical, 6)
+            .background(colors.primaryContainer)
+            .foregroundStyle(colors.onPrimaryContainer)
+            .clipShape(Capsule())
+        }
+        .buttonStyle(.plain)
     }
 }
 
@@ -3660,6 +4096,53 @@ struct UserTabView: View {
                 .clipShape(RoundedRectangle(cornerRadius: 15, style: .continuous))
                 .padding(.horizontal, 12)
 
+                // Pembaruan Otomatis (TrollStore 1-Tap Updater)
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack {
+                        Text("Pembaruan Aplikasi (Auto-Update)")
+                            .font(.system(size: 14.5, weight: .bold))
+                            .foregroundStyle(colors.textPrimary)
+                        Spacer()
+                        Text("v\(app.currentAppVersion) (\(app.currentAppBuild))")
+                            .font(.system(size: 11.5, weight: .bold, design: .monospaced))
+                            .foregroundStyle(colors.secondary)
+                    }
+                    Text("Cek rilis terbaru dari GitHub dan pasang otomatis 1-tap lewat TrollStore tanpa kabel USB.")
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(colors.textHint)
+
+                    HStack(spacing: 8) {
+                        SiapOutlinedButton(
+                            app.isCheckingUpdate ? "Memeriksa..." : "Cek Pembaruan",
+                            icon: "arrow.triangle.2.circlepath",
+                            color: colors.secondary
+                        ) {
+                            Task { await app.checkForAppUpdate(silent: false) }
+                        }
+                        .disabled(app.isCheckingUpdate)
+
+                        SiapFilledButton(
+                            app.availableUpdate != nil ? "Update v\(app.availableUpdate!.remoteVersion)" : "Install Latest (TrollStore)",
+                            icon: "arrow.down.circle.fill",
+                            bg: colors.primaryAction,
+                            fg: colors.onPrimaryAction
+                        ) {
+                            let info = app.availableUpdate ?? AppUpdateInfo(
+                                remoteVersion: app.currentAppVersion,
+                                remoteBuild: app.currentAppBuild,
+                                ipaDownloadUrl: "https://github.com/rianpermana7io/SiapNEO/releases/download/latest/SIAPNeo-iOS.ipa",
+                                notes: ""
+                            )
+                            app.triggerTrollStoreUpdate(info)
+                        }
+                    }
+                }
+                .padding(14)
+                .background(colors.surface)
+                .overlay(RoundedRectangle(cornerRadius: 15, style: .continuous).stroke(colors.cardBorder, lineWidth: 1))
+                .clipShape(RoundedRectangle(cornerRadius: 15, style: .continuous))
+                .padding(.horizontal, 12)
+
                 // Diagnostik Server Card
                 VStack(alignment: .leading, spacing: 10) {
                     HStack {
@@ -3715,7 +4198,7 @@ struct UserTabView: View {
                 }
                 .padding(.horizontal, 12)
 
-                Text("SIAP NEO iOS Native v1.19.4 • KPU BC Tipe A Tanjung Priok")
+                Text("SIAP NEO iOS Native v1.19.5 • KPU BC Tipe A Tanjung Priok")
                     .font(.system(size: 11))
                     .foregroundStyle(colors.textHint)
                     .padding(.bottom, 14)

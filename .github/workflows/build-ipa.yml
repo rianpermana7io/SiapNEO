@@ -54,8 +54,13 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          VER=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" Resources/Info.plist)
+          BUILD=$(/usr/libexec/PlistBuddy -c "Print :CFBundleVersion" Resources/Info.plist)
+          TITLE="SIAP NEO iOS v${VER} (${BUILD})"
+          NOTES="VERSION=${VER} BUILD=${BUILD} - Automated macos-15 release build"
           if gh release view latest >/dev/null 2>&1; then
+            gh release edit latest --title "${TITLE}" --notes "${NOTES}"
             gh release upload latest SIAPNeo-iOS.ipa --clobber
           else
-            gh release create latest SIAPNeo-iOS.ipa --title "SIAP NEO iOS Latest" --notes "Latest automated iOS IPA build"
+            gh release create latest SIAPNeo-iOS.ipa --title "${TITLE}" --notes "${NOTES}"
           fi

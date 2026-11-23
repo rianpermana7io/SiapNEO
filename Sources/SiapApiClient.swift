@@ -498,14 +498,23 @@ final class SiapApiClient {
     private let desktopUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 
     func absolutizeSiap3(_ raw: String) -> String {
-        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        var trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return "" }
+        while trimmed.hasPrefix("../") {
+            trimmed = String(trimmed.dropFirst(3))
+        }
+        while trimmed.hasPrefix("./") {
+            trimmed = String(trimmed.dropFirst(2))
+        }
         let encoded = trimmed.replacingOccurrences(of: " ", with: "%20")
         if encoded.lowercased().hasPrefix("http://") || encoded.lowercased().hasPrefix("https://") {
             return encoded
         }
         if encoded.hasPrefix("/siap3.0") || encoded.hasPrefix("/slim3.0") || encoded.hasPrefix("/siap/") {
             return "https://bcpriok.net" + encoded
+        }
+        if encoded.hasPrefix("siap3.0/") || encoded.hasPrefix("slim3.0/") || encoded.hasPrefix("siap/") {
+            return "https://bcpriok.net/" + encoded
         }
         if encoded.hasPrefix("/") {
             return SiapCrypto.siap3Base + encoded
@@ -753,12 +762,18 @@ final class SiapApiClient {
 
             var out: [PendokDocumentAttachment] = []
             for (idx, item) in arr.enumerated() {
-                var path = cleanField(item, "file_path", fallback: "")
-                if path.isEmpty { path = cleanField(item, "link", fallback: "") }
-                if path.isEmpty { path = cleanField(item, "url", fallback: "") }
+                var path = ""
+                for key in ["file_path", "link", "url", "file", "dokumen", "path"] {
+                    let cand = cleanField(item, key, fallback: "")
+                    if !cand.isEmpty && cand != "-" {
+                        path = cand
+                        break
+                    }
+                }
                 guard !path.isEmpty else { continue }
 
                 var nama = cleanField(item, "nama_dokumen", fallback: "")
+                if nama.isEmpty { nama = cleanField(item, "keterangan", fallback: "") }
                 let jenis = cleanField(item, "jenis_dokumen", fallback: nama.isEmpty ? "Dokumen" : nama)
                 if nama.isEmpty { nama = jenis }
                 let tgl = cleanField(item, "tgl_upload", fallback: "")
@@ -778,19 +793,82 @@ final class SiapApiClient {
         return []
     }
 
-    /// Searches SIAP 3.0 pendok_mk by PIB number and returns all document attachments (PIB, INV, PL, B/L, COO, etc.)
-    func fetchAttachmentsForPib(username: String, password: String, fallbackEmail: String = "", noPib: String) async throws -> [PendokDocumentAttachment] {
+    /// Searches SIAP 3.0 pendok_mk across multiple PIB query variants (raw, zero-stripped, 6-digit zero-padded, optional importir)
+    func searchPendokFlexible(username: String, password: String, fallbackEmail: String = "", noPib: String, importirHint: String = "") async throws -> [PendokBrowseItem] {
         let digits = noPib.filter(\.isNumber)
-        guard !digits.isEmpty else { return [] }
-        let items = try await browsePendok(username: username, password: password, fallbackEmail: fallbackEmail, query: digits, start: 0, length: 25)
         let normTarget = String(digits.drop(while: { $0 == "0" }))
-        let matched = items.first(where: {
-            let d = $0.noPib.filter(\.isNumber)
-            let nd = String(d.drop(while: { $0 == "0" }))
-            return d == digits || (!normTarget.isEmpty && nd == normTarget)
-        }) ?? items.first
-        guard let kode = matched?.actionId, !kode.isEmpty else { return [] }
-        return try await fetchPendokAttachments(username: username, password: password, fallbackEmail: fallbackEmail, kodePelayanan: kode)
+        var variants: [String] = []
+        if !digits.isEmpty { variants.append(digits) }
+        if !normTarget.isEmpty && !variants.contains(normTarget) { variants.append(normTarget) }
+        if !normTarget.isEmpty && normTarget.count < 6 {
+            let padded = String(repeating: "0", count: 6 - normTarget.count) + normTarget
+            if !variants.contains(padded) { variants.append(padded) }
+        }
+        let cleanImp = importirHint.trimmingCharacters(in: .whitespacesAndNewlines)
+        if variants.isEmpty && !cleanImp.isEmpty {
+            variants.append(cleanImp)
+        }
+
+        for q in variants {
+            let items = try await browsePendok(username: username, password: password, fallbackEmail: fallbackEmail, query: q, start: 0, length: 25)
+            if !items.isEmpty {
+                // Sort exact PIB matches first
+                return items.sorted { a, b in
+                    let ad = String(a.noPib.filter(\.isNumber).drop(while: { $0 == "0" }))
+                    let bd = String(b.noPib.filter(\.isNumber).drop(while: { $0 == "0" }))
+                    let am = !normTarget.isEmpty && ad == normTarget
+                    let bm = !normTarget.isEmpty && bd == normTarget
+                    if am != bm { return am }
+                    return false
+                }
+            }
+        }
+        // Final fallback: search by importir name and filter by PIB if possible
+        if !cleanImp.isEmpty && !variants.contains(cleanImp) {
+            let items = try await browsePendok(username: username, password: password, fallbackEmail: fallbackEmail, query: cleanImp, start: 0, length: 25)
+            if !items.isEmpty {
+                let exact = items.filter {
+                    let nd = String($0.noPib.filter(\.isNumber).drop(while: { $0 == "0" }))
+                    return !normTarget.isEmpty && nd == normTarget
+                }
+                return exact.isEmpty ? items : exact
+            }
+        }
+        return []
+    }
+
+    /// Searches SIAP 3.0 pendok_mk by PIB number and returns all document attachments (PIB, INV, PL, B/L, COO, etc.)
+    func fetchAttachmentsForPib(username: String, password: String, fallbackEmail: String = "", noPib: String, importirHint: String = "") async throws -> [PendokDocumentAttachment] {
+        let items = try await searchPendokFlexible(username: username, password: password, fallbackEmail: fallbackEmail, noPib: noPib, importirHint: importirHint)
+        guard let first = items.first, !first.actionId.isEmpty else { return [] }
+        return try await fetchPendokAttachments(username: username, password: password, fallbackEmail: fallbackEmail, kodePelayanan: first.actionId)
+    }
+
+    /// Checks latest GitHub Release metadata for in-app TrollStore auto-update
+    func checkLatestReleaseUpdate() async -> AppUpdateInfo? {
+        guard let url = URL(string: "https://api.github.com/repos/rianpermana7io/SiapNEO/releases/tags/latest") else { return nil }
+        var req = URLRequest(url: url)
+        req.setValue("SIAPNeo-iOS-Updater", forHTTPHeaderField: "User-Agent")
+        req.cachePolicy = .reloadIgnoringLocalCacheData
+        guard let (data, resp) = try? await session.data(for: req),
+              let http = resp as? HTTPURLResponse, (200...299).contains(http.statusCode),
+              let dict = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
+            return nil
+        }
+        let title = (dict["name"] as? String) ?? ""
+        let body = (dict["body"] as? String) ?? ""
+        let combined = "\(title) \(body)"
+        let remoteVer = extractFirstMatch(pattern: #"v?(\d+\.\d+\.\d+)"#, in: combined) ?? ""
+        let remoteBuildStr = extractFirstMatch(pattern: #"(?:BUILD=|\()(\d+)"#, in: combined) ?? "0"
+        let remoteBuild = Int(remoteBuildStr) ?? 0
+        var ipaUrl = "https://github.com/rianpermana7io/SiapNEO/releases/download/latest/SIAPNeo-iOS.ipa"
+        if let assets = dict["assets"] as? [[String: Any]],
+           let ipaAsset = assets.first(where: { (($0["name"] as? String) ?? "").lowercased().hasSuffix(".ipa") }),
+           let dl = ipaAsset["browser_download_url"] as? String, !dl.isEmpty {
+            ipaUrl = dl
+        }
+        guard !remoteVer.isEmpty || remoteBuild > 0 else { return nil }
+        return AppUpdateInfo(remoteVersion: remoteVer, remoteBuild: remoteBuild, ipaDownloadUrl: ipaUrl, notes: body)
     }
 
     /// Searches SIAP 3.0 siapfb_pemeriksa/browse_data to find cetak_bap URL for a PIB
@@ -922,9 +1000,11 @@ final class SiapApiClient {
     private func parseHtmlTableRows(html: String, source: String, myPibs: Set<String>, myContainers: Set<String>) -> [TpsMonitorItem] {
         guard let trRegex = try? NSRegularExpression(pattern: "<tr[^>]*>(.*?)</tr>", options: [.caseInsensitive, .dotMatchesLineSeparators]),
               let tdRegex = try? NSRegularExpression(pattern: "<td[^>]*>(.*?)</td>", options: [.caseInsensitive, .dotMatchesLineSeparators]),
+              let thRegex = try? NSRegularExpression(pattern: "<th[^>]*>(.*?)</th>", options: [.caseInsensitive, .dotMatchesLineSeparators]),
               let contRegex = try? NSRegularExpression(pattern: "\\b([A-Z]{4}\\d{7})\\b"),
               let exactPibCellRegex = try? NSRegularExpression(pattern: "^0*\\d{5,6}$"),
-              let pibInTextRegex = try? NSRegularExpression(pattern: "(?<![\\d:-])(\\d{6})(?![\\d:-])") else {
+              let dateTimeRegex = try? NSRegularExpression(pattern: "\\b\\d{2,4}[-/.]\\d{2}[-/.]\\d{2,4}\\b|\\b\\d{2}:\\d{2}(?::\\d{2})?\\b"),
+              let pibInTextRegex = try? NSRegularExpression(pattern: "(?<![\\d:-])(\\d{5,6})(?![\\d:-])") else {
             return []
         }
 
@@ -932,14 +1012,31 @@ final class SiapApiClient {
         let trMatches = trRegex.matches(in: html, range: NSRange(location: 0, length: nsHtml.length))
         var out: [TpsMonitorItem] = []
 
+        // Track header column indices per table section (matches Android findHeaderIndex)
+        var pibColIdx: Int?
+        var importirColIdx: Int?
+        var statusColIdx: Int?
+
         for m in trMatches {
             if out.count >= 600 { break }
             let rowHtml = nsHtml.substring(with: m.range(at: 1))
-            if rowHtml.lowercased().contains("datatables_empty") || rowHtml.lowercased().contains("<th") { continue }
             let nsRow = rowHtml as NSString
+            if rowHtml.lowercased().contains("datatables_empty") { continue }
+
+            // Check if header row
+            let thMatches = thRegex.matches(in: rowHtml, range: NSRange(location: 0, length: nsRow.length))
+            if thMatches.count >= 3 {
+                let headers = thMatches.map { stripHtml(nsRow.substring(with: $0.range(at: 1))).uppercased() }
+                pibColIdx = headers.firstIndex(where: { $0.contains("NO_DOKUMEN") || $0.contains("NO_PIB") || $0.contains("NO PIB") || $0.contains("NO. PIB") || $0 == "PIB" || $0.contains("DOKUMEN") })
+                importirColIdx = headers.firstIndex(where: { $0.contains("IMPORTIR") || $0.contains("CUSTOMER") || $0.contains("CONSIGNEE") })
+                statusColIdx = headers.firstIndex(where: { $0.contains("STATUS") || $0.contains("KET") })
+                continue
+            }
+
             let tdMatches = tdRegex.matches(in: rowHtml, range: NSRange(location: 0, length: nsRow.length))
             if tdMatches.count < 3 { continue }
-            let cells = tdMatches.map { stripHtml(nsRow.substring(with: $0.range(at: 1))) }.filter { !$0.isEmpty }
+            let rawCells = tdMatches.map { stripHtml(nsRow.substring(with: $0.range(at: 1))) }
+            let cells = rawCells.filter { !$0.isEmpty }
             if cells.count < 2 { continue }
             let joined = cells.joined(separator: " • ")
             let upper = joined.uppercased() as NSString
@@ -949,17 +1046,29 @@ final class SiapApiClient {
                 cont = upper.substring(with: cm.range(at: 1))
             }
 
-            // Prefer exact 5-6 digit PIB cell (skipping container & date/time cells), fallback to regex
+            // 1. Header-guided PIB column first
             var pib = ""
-            for cell in cells {
-                let cTrim = cell.trimmingCharacters(in: .whitespacesAndNewlines)
-                if exactPibCellRegex.firstMatch(in: cTrim, range: NSRange(location: 0, length: (cTrim as NSString).length)) != nil {
-                    pib = cTrim
-                    break
+            if let idx = pibColIdx, idx < rawCells.count {
+                let cellVal = rawCells[idx]
+                let scrubbedCell = dateTimeRegex.stringByReplacingMatches(in: cellVal, range: NSRange(location: 0, length: (cellVal as NSString).length), withTemplate: " ")
+                if let pm = pibInTextRegex.firstMatch(in: scrubbedCell, range: NSRange(location: 0, length: (scrubbedCell as NSString).length)) {
+                    pib = (scrubbedCell as NSString).substring(with: pm.range(at: 1))
                 }
             }
+            // 2. Exact 5-6 digit PIB cell
             if pib.isEmpty {
-                let scrubbed = cont.isEmpty ? joined : joined.replacingOccurrences(of: cont, with: "")
+                for cell in cells {
+                    let cTrim = cell.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if exactPibCellRegex.firstMatch(in: cTrim, range: NSRange(location: 0, length: (cTrim as NSString).length)) != nil {
+                        pib = cTrim
+                        break
+                    }
+                }
+            }
+            // 3. Date/time & container scrubbed fallback
+            if pib.isEmpty {
+                var scrubbed = cont.isEmpty ? joined : joined.replacingOccurrences(of: cont, with: " ")
+                scrubbed = dateTimeRegex.stringByReplacingMatches(in: scrubbed, range: NSRange(location: 0, length: (scrubbed as NSString).length), withTemplate: " ")
                 if let pm = pibInTextRegex.firstMatch(in: scrubbed, range: NSRange(location: 0, length: (scrubbed as NSString).length)) {
                     pib = (scrubbed as NSString).substring(with: pm.range(at: 1))
                 }
@@ -969,11 +1078,21 @@ final class SiapApiClient {
             let isMine = (!normPib.isEmpty && myPibs.contains(normPib))
                 || (!cont.isEmpty && myContainers.contains(cont.uppercased()))
 
-            let importir = cells.first(where: {
-                let u = $0.uppercased()
-                return u.hasPrefix("PT") || u.hasPrefix("CV") || u.hasPrefix("UD") || u.hasPrefix("PD") || u.hasPrefix("FA") || u.hasPrefix("YAYASAN")
-            }) ?? ""
-            let status = cells.last ?? source
+            var importir = ""
+            if let idx = importirColIdx, idx < rawCells.count, !rawCells[idx].isEmpty, rawCells[idx] != "-" {
+                importir = rawCells[idx]
+            } else {
+                importir = cells.first(where: {
+                    let u = $0.uppercased()
+                    return u.hasPrefix("PT") || u.hasPrefix("CV") || u.hasPrefix("UD") || u.hasPrefix("PD") || u.hasPrefix("FA") || u.hasPrefix("YAYASAN")
+                }) ?? ""
+            }
+            let status: String
+            if let idx = statusColIdx, idx < rawCells.count, !rawCells[idx].isEmpty {
+                status = rawCells[idx]
+            } else {
+                status = cells.last ?? source
+            }
 
             out.append(TpsMonitorItem(
                 source: source,

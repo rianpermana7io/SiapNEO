@@ -77,6 +77,12 @@ struct PibDocument: Identifiable, Hashable {
         jenisKontainer.uppercased().contains("LCL")
     }
 
+    var isSudahBapOrSelesai: Bool {
+        let s = status.lowercased()
+        let hasBapNo = !nomorBap.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && nomorBap != "-" && nomorBap.lowercased() != "null"
+        return hasBapNo || s.contains("selesai") || s.contains("done") || s.contains("bap")
+    }
+
     var normalizedStatusCategory: String {
         let s = status.lowercased()
         if s.contains("selesai") || s.contains("done") || s.contains("bap") { return "selesai" }
@@ -85,6 +91,13 @@ struct PibDocument: Identifiable, Hashable {
         if s.contains("pending") || s.contains("tunda") || s.contains("hold") { return "pending" }
         return "lainnya"
     }
+}
+
+struct AppUpdateInfo: Equatable {
+    let remoteVersion: String
+    let remoteBuild: Int
+    let ipaDownloadUrl: String
+    let notes: String
 }
 
 struct ContainerItem: Identifiable, Hashable {
