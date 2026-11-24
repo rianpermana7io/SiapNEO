@@ -1,4 +1,35 @@
 import SwiftUI
+import UIKit
+import UserNotifications
+
+final class SiapAppDelegate: NSObject, UIApplicationDelegate {
+    func application(
+        _ application: UIApplication,
+        didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
+    ) -> Bool {
+        UNUserNotificationCenter.current().delegate = SiapNotificationManager.shared
+        SiapNotificationManager.shared.registerCategories()
+        SiapNotificationManager.shared.registerBackgroundTasks()
+        application.setMinimumBackgroundFetchInterval(UIApplication.backgroundFetchIntervalMinimum)
+        return true
+    }
+
+    func application(
+        _ application: UIApplication,
+        performFetchWithCompletionHandler completionHandler: @escaping (UIBackgroundFetchResult) -> Void
+    ) {
+        Task { @MainActor in
+            let result = await SiapNotificationManager.shared.performBackgroundCheck()
+            if !result.success {
+                completionHandler(.failed)
+            } else if result.foundNew > 0 {
+                completionHandler(.newData)
+            } else {
+                completionHandler(.noData)
+            }
+        }
+    }
+}
 
 enum SiapBottomTab: String, CaseIterable, Identifiable {
     case beranda = "Beranda"
@@ -28,12 +59,15 @@ struct DokapTarget: Identifiable, Equatable {
 
 @main
 struct SIAPNeoApp: App {
+    @UIApplicationDelegateAdaptor(SiapAppDelegate.self) private var appDelegate
     @StateObject private var appState = AppState()
+    @StateObject private var notifManager = SiapNotificationManager.shared
 
     var body: some Scene {
         WindowGroup {
             SiapRootContainer()
                 .environmentObject(appState)
+                .environmentObject(notifManager)
                 .preferredColorScheme(appState.themeMode.preferredColorScheme)
         }
     }
@@ -41,6 +75,7 @@ struct SIAPNeoApp: App {
 
 struct SiapRootContainer: View {
     @EnvironmentObject var app: AppState
+    @EnvironmentObject var notifManager: SiapNotificationManager
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.scenePhase) private var scenePhase
 
@@ -89,11 +124,62 @@ struct SiapRootContainer: View {
             }
         }
         .task {
+            await notifManager.refreshSystemStatus()
+            await notifManager.clearBadge()
+            if app.session != nil {
+                await notifManager.requestPermissionOnLaunchIfNeeded()
+                app.startForegroundDocPolling()
+                notifManager.scheduleBackgroundRefresh()
+                if let pending = notifManager.pendingOpenRequest {
+                    notifManager.pendingOpenRequest = nil
+                    app.handleNotificationOpen(pending)
+                }
+            }
             await app.checkForAppUpdate(silent: true, force: true)
         }
         .onChange(of: scenePhase) { newPhase in
-            if newPhase == .active {
-                Task { await app.checkForAppUpdate(silent: true, force: false) }
+            switch newPhase {
+            case .active:
+                Task {
+                    await notifManager.clearBadge()
+                    await notifManager.refreshSystemStatus()
+                    if app.session != nil {
+                        app.startForegroundDocPolling()
+                        notifManager.scheduleBackgroundRefresh()
+                    }
+                    await app.checkForAppUpdate(silent: true, force: false)
+                }
+            case .background:
+                app.stopForegroundDocPolling()
+                notifManager.scheduleBackgroundRefresh()
+            default:
+                break
+            }
+        }
+        .onChange(of: app.session) { newSession in
+            if newSession != nil {
+                Task {
+                    await notifManager.requestPermissionOnLaunchIfNeeded()
+                    app.startForegroundDocPolling()
+                    notifManager.scheduleBackgroundRefresh()
+                    if let pending = notifManager.pendingOpenRequest {
+                        notifManager.pendingOpenRequest = nil
+                        app.handleNotificationOpen(pending)
+                    }
+                }
+            } else {
+                app.stopForegroundDocPolling()
+            }
+        }
+        .onChange(of: notifManager.pendingOpenRequest) { newReq in
+            if let req = newReq, app.session != nil {
+                notifManager.pendingOpenRequest = nil
+                app.handleNotificationOpen(req)
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .siapBackgroundDocsFetched)) { note in
+            if let fetched = note.object as? [PibDocument] {
+                app.applyBackgroundFetchedPibs(fetched)
             }
         }
     }

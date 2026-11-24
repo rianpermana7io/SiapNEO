@@ -41,7 +41,7 @@ struct UserSession: Codable, Equatable {
 }
 
 /// Exact 24-field port of PibDocument in SIAP NEO v1.19.0
-struct PibDocument: Identifiable, Hashable {
+struct PibDocument: Identifiable, Hashable, Codable {
     var id: String { kodeTiket.isEmpty ? "\(noPib)_\(tglPib)" : kodeTiket }
     let kodeTiket: String
     let noPib: String
@@ -68,6 +68,57 @@ struct PibDocument: Identifiable, Hashable {
     let kendala: String
     let cluster: String
 
+    /// Exact port of Android PibDocument.getClientIdentityKey()
+    var clientIdentityKey: String {
+        let trimmedTiket = kodeTiket.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmedTiket.isEmpty && trimmedTiket != "-" && trimmedTiket.lowercased() != "null" {
+            return "T:\(trimmedTiket.uppercased())"
+        }
+        let pibPart = noPib.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+        let tglPart = tglPib.trimmingCharacters(in: .whitespacesAndNewlines)
+        return "P:\(pibPart)|\(tglPart)"
+    }
+
+    var tglPibFormatted: String {
+        SiapCrypto.formatDisplayDate(tglPib)
+    }
+
+    var tpsCardText: String {
+        let s = kodeTps.trimmingCharacters(in: .whitespacesAndNewlines)
+        return (s.isEmpty || s.lowercased() == "null" || s == "-") ? "-" : s
+    }
+
+    var pfpdCardText: String {
+        let s = namaPfpd.trimmingCharacters(in: .whitespacesAndNewlines)
+        return (s.isEmpty || s.lowercased() == "null" || s == "-") ? "Belum ada PFPD" : s
+    }
+
+    var cleanedContainerType: String {
+        let s = jenisKontainer.trimmingCharacters(in: .whitespacesAndNewlines)
+        if s.isEmpty || s == "-" || s.lowercased() == "null" { return "" }
+        let up = s.uppercased()
+        if up.contains("LCL") { return "LCL" }
+        if up.contains("FCL") { return "FCL" }
+        return up
+    }
+
+    var cleanedNamaPj: String {
+        let s = namaPj.trimmingCharacters(in: .whitespacesAndNewlines)
+        if s.isEmpty || s == "-" || s.lowercased() == "null" { return "-" }
+        let stripped = s.replacingOccurrences(
+            of: "\\s*\\((PIC|PJ|PPJK)\\)\\s*$",
+            with: "",
+            options: [.regularExpression, .caseInsensitive]
+        ).trimmingCharacters(in: .whitespacesAndNewlines)
+        return stripped.isEmpty ? "-" : stripped
+    }
+
+    var hasPhonePj: Bool {
+        let s = hpPj.trimmingCharacters(in: .whitespacesAndNewlines)
+        if s.isEmpty || s == "-" || s.lowercased() == "null" { return false }
+        return s.contains(where: \.isNumber)
+    }
+
     var hasAtensi: Bool {
         let s = atensi.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         return !s.isEmpty && s != "-" && s != "null" && s != "not found" && s != "tidak ada"
@@ -90,6 +141,21 @@ struct PibDocument: Identifiable, Hashable {
         if s.contains("siap") { return "siap" }
         if s.contains("pending") || s.contains("tunda") || s.contains("hold") { return "pending" }
         return "lainnya"
+    }
+}
+
+/// Exact port of Android NotificationOpenRequest + Hubungi PJ action
+struct NotificationOpenRequest: Equatable {
+    let id = UUID()
+    let kodeTiket: String
+    let noPib: String
+    let openPibDocument: Bool
+    let pib: PibDocument?
+    let hubPjPhone: String?
+    let hubPjMessage: String?
+
+    static func == (lhs: NotificationOpenRequest, rhs: NotificationOpenRequest) -> Bool {
+        lhs.id == rhs.id
     }
 }
 

@@ -79,6 +79,10 @@ final class AppState: ObservableObject {
     private let snoozedUpdateBuildKey = "siapneo_ios_snoozed_update_build"
     private let lastRunBuildKey = "siapneo_ios_last_run_build"
     private var lastAutoCheckAt: Date = .distantPast
+    private var foregroundPollTask: Task<Void, Never>?
+    private var foregroundPollerStartedOnce = false
+    private var lastDocCheckAt: Date = .distantPast
+    private var pendingNotificationTarget: NotificationOpenRequest?
 
     var rememberedUsername: String {
         get { UserDefaults.standard.string(forKey: rememberedUserKey) ?? "" }
@@ -311,6 +315,10 @@ final class AppState: ObservableObject {
     }
 
     func logout() {
+        stopForegroundDocPolling()
+        foregroundPollerStartedOnce = false
+        lastDocCheckAt = .distantPast
+        pendingNotificationTarget = nil
         self.session = nil
         self.pibs = []
         self.assignedIps = []
@@ -327,6 +335,7 @@ final class AppState: ObservableObject {
         self.activeDokap = nil
         self.activeTab = .beranda
         UserDefaults.standard.removeObject(forKey: sessionKey)
+        Task { await SiapNotificationManager.shared.onLogout() }
     }
 
     func showToast(_ msg: String) {
@@ -337,6 +346,15 @@ final class AppState: ObservableObject {
         }
     }
 
+    private func sortPibs(_ list: [PibDocument]) -> [PibDocument] {
+        list.sorted { a, b in
+            let ka = SiapApiClient.shared.toSortableTimestamp(a.tglPib)
+            let kb = SiapApiClient.shared.toSortableTimestamp(b.tglPib)
+            if ka != kb { return ka > kb }
+            return a.noPib > b.noPib
+        }
+    }
+
     func loadPibs() async {
         guard let nip = session?.nip, !nip.isEmpty else { return }
         isLoadingPibs = true
@@ -344,18 +362,201 @@ final class AppState: ObservableObject {
         defer { isLoadingPibs = false }
         do {
             let fetched = try await SiapApiClient.shared.fetchHomescreen(nip: nip)
-            pibs = fetched.sorted { a, b in
-                let ka = SiapApiClient.shared.toSortableTimestamp(a.tglPib)
-                let kb = SiapApiClient.shared.toSortableTimestamp(b.tglPib)
-                if ka != kb { return ka > kb }
-                return a.noPib > b.noPib
-            }
+            lastDocCheckAt = Date()
+            pibs = sortPibs(fetched)
             let df = SiapCrypto.wibFormatter("HH:mm")
             lastUpdatedText = "Diperbarui \(df.string(from: Date())) WIB"
+            _ = await SiapNotificationManager.shared.handleFetchedDocuments(fetched, nip: nip, isBackground: false)
+            refinePendingNotificationTarget(with: pibs)
         } catch {
             lastPibError = error.localizedDescription
             showToast("Gagal memuat PIB: \(error.localizedDescription)")
         }
+    }
+
+    // MARK: - New Document Foreground Polling & Notification Deep-Link (Exact Android HomeViewModel Port)
+
+    func startForegroundDocPolling() {
+        guard session != nil else { return }
+        if let existing = foregroundPollTask, !existing.isCancelled {
+            return
+        }
+        let resumedFromBackground = foregroundPollerStartedOnce
+        foregroundPollerStartedOnce = true
+        foregroundPollTask = Task { [weak self] in
+            guard let self else { return }
+            if !resumedFromBackground {
+                try? await Task.sleep(nanoseconds: SiapNotificationManager.foregroundPollIntervalNs)
+            } else {
+                let elapsed = Date().timeIntervalSince(self.lastDocCheckAt)
+                if elapsed >= 0 && elapsed < SiapNotificationManager.resumeMinGapSeconds {
+                    let remainNs = UInt64((SiapNotificationManager.resumeMinGapSeconds - elapsed) * 1_000_000_000)
+                    try? await Task.sleep(nanoseconds: remainNs)
+                }
+            }
+            while !Task.isCancelled {
+                _ = await self.checkNewDocsOnce(manual: false)
+                if Task.isCancelled { break }
+                try? await Task.sleep(nanoseconds: SiapNotificationManager.foregroundPollIntervalNs)
+            }
+        }
+    }
+
+    func stopForegroundDocPolling() {
+        foregroundPollTask?.cancel()
+        foregroundPollTask = nil
+    }
+
+    @discardableResult
+    func checkNewDocsOnce(manual: Bool = false) async -> Int {
+        guard let nip = session?.nip, !nip.isEmpty else { return 0 }
+        if !manual && isLoadingPibs { return 0 }
+        do {
+            let fetched = try await SiapApiClient.shared.fetchHomescreen(nip: nip)
+            lastDocCheckAt = Date()
+            pibs = sortPibs(fetched)
+            let df = SiapCrypto.wibFormatter("HH:mm")
+            lastUpdatedText = "Diperbarui \(df.string(from: Date())) WIB"
+            let newCount = await SiapNotificationManager.shared.handleFetchedDocuments(fetched, nip: nip, isBackground: false)
+            refinePendingNotificationTarget(with: pibs)
+            if manual {
+                if newCount > 0 {
+                    showToast("Ditemukan \(newCount) dokumen baru!")
+                } else {
+                    showToast("Tidak ada dokumen baru • \(pibs.count) PIB aktif")
+                }
+            }
+            return newCount
+        } catch {
+            if manual {
+                showToast("Gagal memeriksa dokumen baru: \(error.localizedDescription)")
+            }
+            return 0
+        }
+    }
+
+    func applyBackgroundFetchedPibs(_ fetched: [PibDocument]) {
+        lastDocCheckAt = Date()
+        pibs = sortPibs(fetched)
+        let df = SiapCrypto.wibFormatter("HH:mm")
+        lastUpdatedText = "Diperbarui \(df.string(from: Date())) WIB"
+        refinePendingNotificationTarget(with: pibs)
+    }
+
+    private func matchesNotificationTarget(_ doc: PibDocument, kodeTiket: String, noPib: String) -> Bool {
+        let tk = kodeTiket.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !tk.isEmpty && tk != "-" && doc.kodeTiket.trimmingCharacters(in: .whitespacesAndNewlines).caseInsensitiveCompare(tk) == .orderedSame {
+            return true
+        }
+        let targetDigits = noPib.filter(\.isNumber)
+        let docDigits = doc.noPib.filter(\.isNumber)
+        if !targetDigits.isEmpty && !docDigits.isEmpty {
+            let nt = String(targetDigits.drop(while: { $0 == "0" }))
+            let nd = String(docDigits.drop(while: { $0 == "0" }))
+            return targetDigits == docDigits || (!nt.isEmpty && nt == nd)
+        }
+        return false
+    }
+
+    private func refinePendingNotificationTarget(with docs: [PibDocument]) {
+        guard let pending = pendingNotificationTarget else { return }
+        guard let matched = docs.first(where: { matchesNotificationTarget($0, kodeTiket: pending.kodeTiket, noPib: pending.noPib) }) else {
+            return
+        }
+        pendingNotificationTarget = nil
+        if let current = selectedPib,
+           matchesNotificationTarget(current, kodeTiket: pending.kodeTiket, noPib: pending.noPib) {
+            selectedPib = matched
+        }
+    }
+
+    func handleNotificationOpen(_ request: NotificationOpenRequest) {
+        if let phone = request.hubPjPhone, !phone.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            openWhatsApp(phone: phone, message: request.hubPjMessage ?? "")
+            return
+        }
+
+        let tk = request.kodeTiket.trimmingCharacters(in: .whitespacesAndNewlines)
+        let np = request.noPib.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !tk.isEmpty || !np.isEmpty else { return }
+
+        let matched = pibs.first { matchesNotificationTarget($0, kodeTiket: tk, noPib: np) }
+        let target: PibDocument
+        if let matched {
+            target = matched
+            pendingNotificationTarget = nil
+        } else {
+            target = request.pib ?? PibDocument(
+                kodeTiket: tk,
+                noPib: np,
+                tglPib: "",
+                jenisDokumen: "PIB",
+                importir: "-",
+                kodeTps: "-",
+                jenisKontainer: "-",
+                ipCeisa: "-",
+                namaPfpd: "-",
+                noHpPfpd: "",
+                atensi: "",
+                namaPj: "-",
+                hpPj: "",
+                nomorBap: "",
+                tglBap: "-",
+                persentasePeriksa: "-",
+                status: "Aktif",
+                jumlahItem: "-",
+                barcon: "-",
+                pendampingan: "-",
+                bidangPendamping: "-",
+                namaPendamping: "-",
+                kendala: "-",
+                cluster: "-"
+            )
+            pendingNotificationTarget = request
+            Task { await loadPibs() }
+        }
+
+        activeTab = .beranda
+        openPib(target)
+
+        if request.openPibDocument {
+            Task { await openPibPdf(for: target) }
+        }
+    }
+
+    func openPibPdf(for pib: PibDocument) async {
+        showToast("Membuka dokumen PIB \(pib.noPib)...")
+        if !pib.kodeTiket.isEmpty,
+           let dokap = try? await SiapApiClient.shared.fetchDokumen(kodeTiket: pib.kodeTiket) {
+            for (k, v) in dokap where k.lowercased().contains("pib") {
+                if let u = URL(string: SiapApiClient.shared.absolutizeSiap3(v)) {
+                    activeDokap = DokapTarget(title: "PIB \(pib.noPib)", url: u)
+                    return
+                }
+            }
+            for (k, v) in dokap {
+                let ku = k.uppercased()
+                if !ku.contains("B/L") && !ku.contains("BILL") && !ku.contains("LADING"),
+                   let u = URL(string: SiapApiClient.shared.absolutizeSiap3(v)) {
+                    activeDokap = DokapTarget(title: "PIB \(pib.noPib)", url: u)
+                    return
+                }
+            }
+        }
+        if let sess = session,
+           let atts = try? await SiapApiClient.shared.fetchAttachmentsForPib(
+               username: sess.username,
+               password: sess.password,
+               fallbackEmail: sess.usernameEmail,
+               noPib: pib.noPib,
+               importirHint: pib.importir
+           ),
+           let pibAtt = atts.first(where: { $0.namaDokumen.uppercased().contains("PIB") || $0.jenisDokumen.uppercased().contains("PIB") }),
+           let u = URL(string: pibAtt.fileUrl) {
+            activeDokap = DokapTarget(title: "PIB \(pib.noPib)", url: u)
+            return
+        }
+        showToast("Dokumen PIB \(pib.noPib) belum tersedia — cek Lampiran Dokumen")
     }
 
     func loadAssignedIps(query: String = "", reset: Bool = true) async {
@@ -410,6 +611,8 @@ final class AppState: ObservableObject {
         var digits = phone.filter(\.isNumber)
         if digits.hasPrefix("0") {
             digits = "62" + digits.dropFirst()
+        } else if digits.hasPrefix("8") {
+            digits = "62" + digits
         }
         let enc = message.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
         let urlStr = digits.isEmpty ? "https://wa.me/?text=\(enc)" : "https://wa.me/\(digits)?text=\(enc)"
@@ -455,7 +658,7 @@ struct LoginView: View {
                             .font(.system(size: 13.5, weight: .medium))
                             .foregroundStyle(SiapColors.hintOnNavy)
 
-                        Text("Sistem Informasi Pemeriksaan Fisik • v1.19.8")
+                        Text("Sistem Informasi Pemeriksaan Fisik • v\(app.currentAppVersion)")
                             .font(.system(size: 11, weight: .bold))
                             .padding(.horizontal, 12)
                             .padding(.vertical, 5)
@@ -5382,9 +5585,12 @@ struct UserTabView: View {
     }
 
     @EnvironmentObject var app: AppState
+    @EnvironmentObject var notifManager: SiapNotificationManager
     let colors: SiapColors
 
     @State private var isTestingDiag = false
+    @State private var isCheckingNewDocs = false
+    @State private var isSendingTestNotif = false
     @State private var diagResults: [(String, Bool, String)] = []
     @State private var showLogoutConfirm = false
     @State private var siap3User = UserDefaults.standard.string(forKey: "siapneo_siap3_user") ?? ""
@@ -5428,6 +5634,174 @@ struct UserTabView: View {
                 .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
                 .padding(.horizontal, 12)
                 .padding(.top, 10)
+
+                // Notifikasi Dokumen Pemeriksaan Card (1:1 Mirror Android UserScreenKt + iOS Controls)
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack {
+                        HStack(spacing: 7) {
+                            Image(systemName: notifManager.isNotificationEnabled ? "bell.badge.fill" : "bell.slash.fill")
+                                .font(.system(size: 14, weight: .bold))
+                                .foregroundStyle(notifManager.isNotificationEnabled && notifManager.isSystemPermissionGranted ? SiapColors.brandAmber : colors.textHint)
+                            Text("Notifikasi Dokumen Baru")
+                                .font(.system(size: 14.5, weight: .bold))
+                                .foregroundStyle(colors.textPrimary)
+                        }
+                        Spacer()
+                        let badgeColor: Color = (!notifManager.isNotificationEnabled)
+                            ? colors.textHint
+                            : (notifManager.isSystemPermissionGranted ? colors.success : (notifManager.isPermissionDenied ? colors.danger : SiapColors.brandAmber))
+                        Text(notifManager.permissionBadgeLabel)
+                            .font(.system(size: 10, weight: .heavy))
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 3)
+                            .background(badgeColor.opacity(0.16))
+                            .foregroundStyle(badgeColor)
+                            .clipShape(Capsule())
+                    }
+
+                    Toggle(isOn: Binding(
+                        get: { notifManager.isNotificationEnabled },
+                        set: { newVal in
+                            Task {
+                                await notifManager.setNotificationEnabled(newVal)
+                                if newVal {
+                                    if notifManager.isPermissionDenied {
+                                        app.showToast("Izin notifikasi ditolak di iOS — aktifkan lewat Pengaturan iPhone")
+                                    } else {
+                                        app.startForegroundDocPolling()
+                                        app.showToast("Notifikasi dokumen pemeriksaan aktif")
+                                    }
+                                } else {
+                                    app.showToast("Notifikasi dokumen pemeriksaan dibisukan")
+                                }
+                            }
+                        }
+                    )) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Notifikasi Dokumen Pemeriksaan")
+                                .font(.system(size: 13, weight: .semibold))
+                                .foregroundStyle(colors.textPrimary)
+                            Text(notifManager.isNotificationEnabled
+                                 ? "Aktif: info penunjukan IP baru (cek layar 25 dtk & latar)"
+                                 : "Dibisukan")
+                                .font(.system(size: 11))
+                                .foregroundStyle(colors.textHint)
+                        }
+                    }
+                    .tint(colors.primaryAction)
+
+                    if notifManager.isPermissionDenied {
+                        HStack(spacing: 8) {
+                            Image(systemName: "exclamationmark.triangle.fill")
+                                .font(.system(size: 12))
+                                .foregroundStyle(colors.danger)
+                            Text("Izin notifikasi iPhone nonaktif. Ketuk Buka Pengaturan untuk mengizinkan notifikasi SIAP NEO.")
+                                .font(.system(size: 11, weight: .medium))
+                                .foregroundStyle(colors.danger)
+                            Spacer()
+                            Button {
+                                notifManager.openSystemNotificationSettings()
+                            } label: {
+                                Text("Pengaturan")
+                                    .font(.system(size: 11, weight: .bold))
+                                    .padding(.horizontal, 9)
+                                    .padding(.vertical, 5)
+                                    .background(colors.danger)
+                                    .foregroundStyle(.white)
+                                    .clipShape(Capsule())
+                            }
+                            .buttonStyle(.plain)
+                        }
+                        .padding(9)
+                        .background(colors.danger.opacity(0.12))
+                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    } else if !notifManager.isBackgroundRefreshAvailable {
+                        HStack(spacing: 8) {
+                            Image(systemName: "clock.badge.exclamationmark")
+                                .font(.system(size: 12))
+                                .foregroundStyle(colors.warningBoxText)
+                            Text("Segarkan App di Latar mati — aktifkan di Pengaturan iOS agar cek otomatis tetap berjalan saat aplikasi di latar.")
+                                .font(.system(size: 11, weight: .medium))
+                                .foregroundStyle(colors.warningBoxText)
+                            Spacer()
+                            Button {
+                                notifManager.openAppSettings()
+                            } label: {
+                                Text("Atur")
+                                    .font(.system(size: 11, weight: .bold))
+                                    .padding(.horizontal, 9)
+                                    .padding(.vertical, 5)
+                                    .background(SiapColors.brandAmber)
+                                    .foregroundStyle(Color(hex: 0x0B131D))
+                                    .clipShape(Capsule())
+                            }
+                            .buttonStyle(.plain)
+                        }
+                        .padding(9)
+                        .background(colors.warningBoxBg)
+                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    } else {
+                        HStack(spacing: 6) {
+                            Image(systemName: "checkmark.circle.fill")
+                                .font(.system(size: 11.5))
+                                .foregroundStyle(colors.success)
+                            Text(notifManager.lastCheckDisplay.isEmpty
+                                 ? "Segarkan App di Latar siap • Cek otomatis aktif"
+                                 : "Cek terakhir \(notifManager.lastCheckDisplay)" + (notifManager.lastBackgroundCheckDisplay.isEmpty ? "" : " • Latar \(notifManager.lastBackgroundCheckDisplay)"))
+                                .font(.system(size: 11, weight: .medium))
+                                .foregroundStyle(colors.textSecondary)
+                            Spacer()
+                        }
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 7)
+                        .background(colors.success.opacity(0.11))
+                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    }
+
+                    HStack(spacing: 8) {
+                        SiapOutlinedButton(
+                            isCheckingNewDocs ? "Memeriksa..." : "Cek Dokumen",
+                            icon: "arrow.triangle.2.circlepath",
+                            color: colors.secondary
+                        ) {
+                            Task {
+                                isCheckingNewDocs = true
+                                defer { isCheckingNewDocs = false }
+                                _ = await app.checkNewDocsOnce(manual: true)
+                            }
+                        }
+                        .disabled(isCheckingNewDocs)
+
+                        SiapFilledButton(
+                            isSendingTestNotif ? "Mengirim..." : "Tes Notifikasi",
+                            icon: "bell.badge",
+                            bg: colors.primaryAction,
+                            fg: colors.onPrimaryAction,
+                            isLoading: isSendingTestNotif
+                        ) {
+                            Task {
+                                isSendingTestNotif = true
+                                defer { isSendingTestNotif = false }
+                                let sent = await notifManager.sendTestNotification(samplePib: app.pibs.first)
+                                if sent {
+                                    app.showToast("Notifikasi tes dikirim! Tahan banner untuk aksi Buka PIB / Hubungi PJ.")
+                                } else {
+                                    app.showToast("Izin notifikasi belum diizinkan — buka Pengaturan iPhone")
+                                    notifManager.openSystemNotificationSettings()
+                                }
+                            }
+                        }
+                        .disabled(isSendingTestNotif)
+                    }
+                }
+                .padding(14)
+                .background(colors.surface)
+                .overlay(RoundedRectangle(cornerRadius: 15, style: .continuous).stroke(colors.cardBorder, lineWidth: 1))
+                .clipShape(RoundedRectangle(cornerRadius: 15, style: .continuous))
+                .padding(.horizontal, 12)
+                .task {
+                    await notifManager.refreshSystemStatus()
+                }
 
                 // Theme & UI Density Card (Matches Android ThemeOptionChip + UiDensityOptionChip)
                 VStack(alignment: .leading, spacing: 12) {
