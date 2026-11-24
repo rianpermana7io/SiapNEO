@@ -393,15 +393,183 @@ struct PendokDocumentAttachment: Identifiable, Hashable {
     let tglUpload: String
 }
 
-struct TpsMonitorItem: Identifiable {
-    let id = UUID()
-    let source: String
-    let container: String
-    let pib: String
+// MARK: - TPS Monitoring Models (1:1 Port of Android GrahaMonitorItem, NpctMonitorItem, TpslMonitorItem, TpsMonitorSnapshot)
+
+struct GrahaMonitorItem: Identifiable, Hashable, Codable {
+    var id: String { "graha_\(noContainer)_\(noPib)_\(tglPib)_\(lokasi)_\(status)" }
+    let noContainer: String
+    let size: String
+    let lokasi: String
+    let noPib: String
+    let tglPib: String
     let importir: String
     let status: String
-    let summary: String
     let isMyTask: Bool
+
+    init(
+        noContainer: String,
+        size: String,
+        lokasi: String,
+        noPib: String,
+        tglPib: String,
+        importir: String,
+        status: String,
+        isMyTask: Bool = false
+    ) {
+        self.noContainer = noContainer
+        self.size = size
+        self.lokasi = lokasi
+        self.noPib = noPib
+        self.tglPib = tglPib
+        self.importir = importir
+        self.status = status
+        self.isMyTask = isMyTask
+    }
+
+    func with(tglPib: String? = nil, importir: String? = nil, isMyTask: Bool? = nil) -> GrahaMonitorItem {
+        GrahaMonitorItem(
+            noContainer: noContainer,
+            size: size,
+            lokasi: lokasi,
+            noPib: noPib,
+            tglPib: tglPib ?? self.tglPib,
+            importir: importir ?? self.importir,
+            status: status,
+            isMyTask: isMyTask ?? self.isMyTask
+        )
+    }
+}
+
+struct NpctMonitorItem: Identifiable, Hashable, Codable {
+    var id: String { "npct_\(noContainer)_\(noPib)_\(tglPib)_\(lokasi)" }
+    let noContainer: String
+    let size: String
+    let lokasi: String
+    let noPib: String
+    let tglPib: String
+    let waktuGateIn: String
+    let status: String
+    let keterangan: String
+    let note: String
+    let respon: String
+    let isMyTask: Bool
+    let importir: String
+    let waktuSiapPeriksa: String
+
+    init(
+        noContainer: String,
+        size: String,
+        lokasi: String,
+        noPib: String,
+        tglPib: String,
+        waktuGateIn: String = "",
+        status: String,
+        keterangan: String = "-",
+        note: String = "-",
+        respon: String = "",
+        isMyTask: Bool = false,
+        importir: String = "",
+        waktuSiapPeriksa: String = ""
+    ) {
+        self.noContainer = noContainer
+        self.size = size
+        self.lokasi = lokasi
+        self.noPib = noPib
+        self.tglPib = tglPib
+        self.waktuGateIn = waktuGateIn
+        self.status = status
+        self.keterangan = keterangan
+        self.note = note
+        self.respon = respon
+        self.isMyTask = isMyTask
+        self.importir = importir
+        self.waktuSiapPeriksa = waktuSiapPeriksa
+    }
+
+    func with(tglPib: String? = nil, importir: String? = nil, isMyTask: Bool? = nil) -> NpctMonitorItem {
+        NpctMonitorItem(
+            noContainer: noContainer,
+            size: size,
+            lokasi: lokasi,
+            noPib: noPib,
+            tglPib: tglPib ?? self.tglPib,
+            waktuGateIn: waktuGateIn,
+            status: status,
+            keterangan: keterangan,
+            note: note,
+            respon: respon,
+            isMyTask: isMyTask ?? self.isMyTask,
+            importir: importir ?? self.importir,
+            waktuSiapPeriksa: waktuSiapPeriksa
+        )
+    }
+}
+
+struct TpslMonitorItem: Identifiable, Hashable, Codable {
+    var id: String { "tpsl_\(cluster)_\(noPib)_\(kodeTiket)_\(pengajuan)_\(antrian)" }
+    let pengajuan: String
+    let antrian: String
+    let kodeTiket: String
+    let importir: String
+    let noPib: String
+    let tglPib: String
+    let lokasi: String
+    let keputusan: String
+    let cluster: String
+    let isMyTask: Bool
+
+    init(
+        pengajuan: String,
+        antrian: String,
+        kodeTiket: String,
+        importir: String,
+        noPib: String,
+        tglPib: String,
+        lokasi: String,
+        keputusan: String,
+        cluster: String,
+        isMyTask: Bool = false
+    ) {
+        self.pengajuan = pengajuan
+        self.antrian = antrian
+        self.kodeTiket = kodeTiket
+        self.importir = importir
+        self.noPib = noPib
+        self.tglPib = tglPib
+        self.lokasi = lokasi
+        self.keputusan = keputusan
+        self.cluster = cluster
+        self.isMyTask = isMyTask
+    }
+
+    func with(isMyTask: Bool) -> TpslMonitorItem {
+        TpslMonitorItem(
+            pengajuan: pengajuan,
+            antrian: antrian,
+            kodeTiket: kodeTiket,
+            importir: importir,
+            noPib: noPib,
+            tglPib: tglPib,
+            lokasi: lokasi,
+            keputusan: keputusan,
+            cluster: cluster,
+            isMyTask: isMyTask
+        )
+    }
+}
+
+struct TpsMonitorSnapshot: Equatable, Codable {
+    var grahaRows: [GrahaMonitorItem] = []
+    var npctRows: [NpctMonitorItem] = []
+    var tpslRows: [TpslMonitorItem] = []
+    var lastUpdated: String = ""
+    var isLoading: Bool = false
+    var errorMessage: String? = nil
+    var failedSources: [String] = []
+
+    var hasAnyData: Bool {
+        !grahaRows.isEmpty || !npctRows.isEmpty || !tpslRows.isEmpty
+    }
 }
 
 enum TpsSource: String, CaseIterable, Identifiable {
@@ -410,6 +578,64 @@ enum TpsSource: String, CaseIterable, Identifiable {
     case tpsl = "TPSL"
 
     var id: String { rawValue }
+}
+
+enum TpsFilterStatus: Int, CaseIterable, Identifiable {
+    case all = 0
+    case siap = 1
+    case sedang = 2
+    case ppk = 3
+
+    var id: Int { rawValue }
+
+    var label: String {
+        switch self {
+        case .all: return "SEMUA"
+        case .siap: return "SIAP"
+        case .sedang: return "PROSES"
+        case .ppk: return "PPK"
+        }
+    }
+}
+
+enum GrahaSortOption: String, CaseIterable, Identifiable {
+    case `default` = "Siap Periksa (Terbaru)"
+    case lokasiAsc = "Lokasi (A-Z)"
+    case containerAsc = "No. Kontainer (A-Z)"
+    case pibAsc = "No. PIB (A-Z)"
+
+    var id: String { rawValue }
+    var label: String { rawValue }
+}
+
+enum NpctSortOption: String, CaseIterable, Identifiable {
+    case siapPeriksaDesc = "Siap Periksa (Terbaru)"
+    case siapPeriksaAsc = "Siap Periksa (Terlama)"
+    case containerAsc = "No. Kontainer (A-Z)"
+    case pibAsc = "No. PIB (A-Z)"
+
+    var id: String { rawValue }
+    var label: String { rawValue }
+}
+
+enum TpslSortOption: String, CaseIterable, Identifiable {
+    case `default` = "Default"
+    case tpsAsc = "Berdasarkan TPS (A-Z)"
+
+    var id: String { rawValue }
+    var label: String { rawValue }
+}
+
+/// Lightweight target for opening the quick Lampiran sheet from any TPS card (Graha / NPCT1 / TPSL)
+struct TpsLampiranTarget: Identifiable, Hashable {
+    var id: String { "\(source)_\(container)_\(pib)_\(lokasi)" }
+    let source: String
+    let container: String
+    let pib: String
+    let importir: String
+    let status: String
+    let lokasi: String
+    let isMyTask: Bool
 }
 
 enum HomeStatusFilter: String, CaseIterable, Identifiable {

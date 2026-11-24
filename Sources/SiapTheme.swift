@@ -102,6 +102,7 @@ struct SiapColors {
     static let brandAmber = Color(hex: 0xF59E0B)
     static let brandSky = Color(hex: 0x38BDF8)
     static let hintOnNavy = Color(hex: 0xD5E0E8)
+    static let myTaskGold = Color(hex: 0xF9A825)
 
     static let light = SiapColors(
         isDark: false,
@@ -164,8 +165,8 @@ struct SiapColors {
         warningBoxBg: Color(hex: 0x2D1B06),
         warningBoxBorder: Color(hex: 0xB45309),
         warningBoxText: Color(hex: 0xFDE68A),
-        myTaskBg: Color(hex: 0x1C2819),
-        myTaskBorder: Color(hex: 0xF59E0B),
+        myTaskBg: Color(hex: 0x1B2F23),
+        myTaskBorder: Color(hex: 0xF9A825),
         myTaskText: Color(hex: 0xFDE68A),
         headerGradient: LinearGradient(
             colors: [Color(hex: 0x081018), Color(hex: 0x121E2A), Color(hex: 0x162536)],
@@ -183,24 +184,30 @@ struct SiapColors {
         scheme == .dark ? .dark : .light
     }
 
+    /// Exact 1:1 port of Android SiapModernComponentsKt.statusColors
     func statusBadgeStyle(for rawStatus: String) -> (bg: Color, fg: Color, accent: Color) {
-        let s = rawStatus.lowercased()
-        if s.contains("selesai") || s.contains("done") || s.contains("bap") {
-            return isDark
-                ? (Color(hex: 0x082F49), Color(hex: 0x7DD3FC), Color(hex: 0x38BDF8))
-                : (Color(hex: 0xF0F9FF), Color(hex: 0x0C4A6E), Color(hex: 0x0284C7))
-        }
-        if s.contains("sedang") || s.contains("proses") || s.contains("progress") {
-            return isDark
-                ? (Color(hex: 0x052E16), Color(hex: 0x86EFAC), Color(hex: 0x4ADE80))
-                : (Color(hex: 0xECFDF5), Color(hex: 0x14532D), Color(hex: 0x16A34A))
-        }
-        if s.contains("siap") || s.contains("tolak") || s.contains("batal") || s.contains("belum") {
+        let s = rawStatus.uppercased()
+        if s.contains("TOLAK") || s.contains("BATAL") || s.contains("REJECT") {
             return isDark
                 ? (Color(hex: 0x450A0A), Color(hex: 0xFCA5A5), Color(hex: 0xF87171))
                 : (Color(hex: 0xFEF2F2), Color(hex: 0x991B1B), Color(hex: 0xDC2626))
         }
-        if s.contains("pending") || s.contains("tunda") || s.contains("hold") {
+        if s.contains("SIAP") && !s.contains("BELUM") {
+            return isDark
+                ? (Color(hex: 0x450A0A), Color(hex: 0xFCA5A5), Color(hex: 0xF87171))
+                : (Color(hex: 0xFEF2F2), Color(hex: 0x991B1B), Color(hex: 0xDC2626))
+        }
+        if s.contains("SEDANG") || s.contains("PROSES") || s.contains("PROGRESS") {
+            return isDark
+                ? (Color(hex: 0x052E16), Color(hex: 0x86EFAC), Color(hex: 0x4ADE80))
+                : (Color(hex: 0xECFDF5), Color(hex: 0x14532D), Color(hex: 0x16A34A))
+        }
+        if (s.contains("BAP") && !s.contains("BELUM")) || s.contains("SELESAI") || s.contains("DONE") || s.contains("SPPB") {
+            return isDark
+                ? (Color(hex: 0x082F49), Color(hex: 0x7DD3FC), Color(hex: 0x38BDF8))
+                : (Color(hex: 0xF0F9FF), Color(hex: 0x0C4A6E), Color(hex: 0x0284C7))
+        }
+        if s.contains("IP") || s.contains("BELUM") || s.contains("PPK") || s.contains("MENUNGGU") || s.contains("PENDING") || s.contains("TUNDA") || s.contains("HOLD") {
             return isDark
                 ? (Color(hex: 0x451A03), Color(hex: 0xFDE68A), Color(hex: 0xF59E0B))
                 : (Color(hex: 0xFFFBEB), Color(hex: 0x78350F), Color(hex: 0xD97706))

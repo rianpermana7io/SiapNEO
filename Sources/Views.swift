@@ -53,6 +53,11 @@ final class AppState: ObservableObject {
     @Published var pendingBrowseQuery: String?
     @Published var pendingBrowseAutoExpand = false
     @Published var browseReturnToTps = false
+
+    // TPS Monitoring State (Matches Android HomeUiState.tpsSnapshot)
+    @Published var tpsSnapshot = TpsMonitorSnapshot()
+    @Published var activeTpsSource: TpsSource = .graha
+
     @Published var availableUpdate: AppUpdateInfo?
     @Published var showUpdatePromptSheet = false
     @Published var isCheckingUpdate = false
@@ -83,6 +88,9 @@ final class AppState: ObservableObject {
     private var foregroundPollerStartedOnce = false
     private var lastDocCheckAt: Date = .distantPast
     private var pendingNotificationTarget: NotificationOpenRequest?
+    private var lastTpsFetchAt: Date = .distantPast
+    private var tpsRefreshTask: Task<Void, Never>?
+    private var npctImporterObserver: NSObjectProtocol?
 
     var rememberedUsername: String {
         get { UserDefaults.standard.string(forKey: rememberedUserKey) ?? "" }
@@ -117,6 +125,23 @@ final class AppState: ObservableObject {
             self.toastMessage = "SIAP NEO berhasil diperbarui ke v\(ver)!"
         }
         UserDefaults.standard.set(nowBuild, forKey: lastRunBuildKey)
+
+        // Restore non-expired TPS monitoring cache (matches Android HomeViewModel init)
+        if let cached = TpsMonitorCache.shared.load(),
+           !TpsMonitorCache.isExpired(timestampMillis: cached.timestampMillis) {
+            self.tpsSnapshot = cached.snapshot
+        }
+
+        self.npctImporterObserver = NotificationCenter.default.addObserver(
+            forName: .siapNpctImportersUpdated,
+            object: nil,
+            queue: .main
+        ) { [weak self] note in
+            guard let map = note.object as? [String: String], !map.isEmpty else { return }
+            Task { @MainActor [weak self] in
+                self?.applyLateNpctImporters(map)
+            }
+        }
     }
 
     func navigateBack() {
@@ -334,6 +359,11 @@ final class AppState: ObservableObject {
         self.activeUploadContext = nil
         self.activeDokap = nil
         self.activeTab = .beranda
+        self.tpsRefreshTask?.cancel()
+        self.tpsRefreshTask = nil
+        self.tpsSnapshot = TpsMonitorSnapshot()
+        self.lastTpsFetchAt = .distantPast
+        TpsMonitorCache.shared.clear()
         UserDefaults.standard.removeObject(forKey: sessionKey)
         Task { await SiapNotificationManager.shared.onLogout() }
     }
@@ -368,6 +398,7 @@ final class AppState: ObservableObject {
             lastUpdatedText = "Diperbarui \(df.string(from: Date())) WIB"
             _ = await SiapNotificationManager.shared.handleFetchedDocuments(fetched, nip: nip, isBackground: false)
             refinePendingNotificationTarget(with: pibs)
+            reconcileTpsSnapshotMyTasks()
         } catch {
             lastPibError = error.localizedDescription
             showToast("Gagal memuat PIB: \(error.localizedDescription)")
@@ -419,6 +450,7 @@ final class AppState: ObservableObject {
             lastUpdatedText = "Diperbarui \(df.string(from: Date())) WIB"
             let newCount = await SiapNotificationManager.shared.handleFetchedDocuments(fetched, nip: nip, isBackground: false)
             refinePendingNotificationTarget(with: pibs)
+            reconcileTpsSnapshotMyTasks()
             if manual {
                 if newCount > 0 {
                     showToast("Ditemukan \(newCount) dokumen baru!")
@@ -441,6 +473,7 @@ final class AppState: ObservableObject {
         let df = SiapCrypto.wibFormatter("HH:mm")
         lastUpdatedText = "Diperbarui \(df.string(from: Date())) WIB"
         refinePendingNotificationTarget(with: pibs)
+        reconcileTpsSnapshotMyTasks()
     }
 
     private func matchesNotificationTarget(_ doc: PibDocument, kodeTiket: String, noPib: String) -> Bool {
@@ -584,6 +617,7 @@ final class AppState: ObservableObject {
             }
             assignedIpTotal = max(res.totalRecords, assignedIps.count)
             assignedIpHasMore = res.items.count >= pageSize && assignedIps.count < assignedIpTotal
+            reconcileTpsSnapshotMyTasks()
         } catch {
             assignedIpError = error.localizedDescription
             showToast("Gagal memuat Daftar IP: \(error.localizedDescription)")
@@ -602,8 +636,182 @@ final class AppState: ObservableObject {
                 if ka != kb { return ka > kb }
                 return a.noPib > b.noPib
             }
+            reconcileTpsSnapshotMyTasks()
         } catch {
             showToast("Gagal memuat Instruksi Lorong: \(error.localizedDescription)")
+        }
+    }
+
+    // MARK: - TPS Monitoring Snapshot, Enrichment & Reconciliation (1:1 Port of Android HomeViewModel)
+
+    private func buildMyTaskSets() -> (pibs: Set<String>, containers: Set<String>) {
+        var pibSet = Set<String>()
+        for doc in pibs where !doc.noPib.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            pibSet.insert(doc.noPib)
+        }
+        for item in lorongItems where !item.noPib.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            pibSet.insert(item.noPib)
+        }
+        for ip in assignedIps where !ip.noPib.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            pibSet.insert(ip.noPib)
+        }
+        var contSet = Set<String>()
+        for item in lorongItems {
+            let norm = TpsRowKit.normalizeContainer(item.noContainer)
+            if !norm.isEmpty { contSet.insert(norm) }
+        }
+        return (pibSet, contSet)
+    }
+
+    private func buildPibMetadataLookup() -> [String: (tglPib: String, importir: String)] {
+        var meta = TpsMonitorRepository.shared.getKnownPkbMetadata()
+
+        func merge(noPib: String, tglPib: String, importir: String) {
+            let key = TpsMonitorRepository.normalizePibKey(noPib)
+            guard !key.isEmpty else { return }
+            let cleanTgl = TpsRowKit.cleanServerField(tglPib, fallback: "")
+            let cleanImp = TpsRowKit.cleanServerField(importir, fallback: "")
+            let tglVal = (cleanTgl == "-") ? "" : cleanTgl
+            let impVal = (cleanImp == "-") ? "" : cleanImp
+            guard !tglVal.isEmpty || !impVal.isEmpty else { return }
+            let prev = meta[key]
+            meta[key] = (
+                tglVal.isEmpty ? (prev?.tglPib ?? "") : tglVal,
+                impVal.isEmpty ? (prev?.importir ?? "") : impVal
+            )
+        }
+
+        for ip in assignedIps {
+            merge(noPib: ip.noPib, tglPib: ip.tglPib, importir: ip.importir)
+        }
+        for item in lorongItems {
+            merge(noPib: item.noPib, tglPib: item.tglPib, importir: "")
+        }
+        for doc in pibs {
+            merge(noPib: doc.noPib, tglPib: doc.tglPib, importir: doc.importir)
+        }
+        return meta
+    }
+
+    private func reconcileSnapshot(_ raw: TpsMonitorSnapshot) -> TpsMonitorSnapshot {
+        let sets = buildMyTaskSets()
+        var reconciled = TpsMonitorRepository.recomputeMyTasks(
+            snapshot: raw,
+            activeMyPibs: sets.pibs,
+            activeMyContainers: sets.containers
+        )
+        let meta = buildPibMetadataLookup()
+        if !meta.isEmpty {
+            reconciled.grahaRows = reconciled.grahaRows.map { row in
+                let key = TpsMonitorRepository.normalizePibKey(row.noPib)
+                guard !key.isEmpty, let info = meta[key] else { return row }
+                let curTgl = TpsRowKit.cleanServerField(row.tglPib, fallback: "")
+                let curImp = TpsRowKit.cleanServerField(row.importir, fallback: "")
+                let newTgl = (curTgl.isEmpty || curTgl == "-") && !info.tglPib.isEmpty ? info.tglPib : row.tglPib
+                let newImp = (curImp.isEmpty || curImp == "-") && !info.importir.isEmpty ? info.importir : row.importir
+                if newTgl == row.tglPib && newImp == row.importir { return row }
+                return row.with(tglPib: newTgl, importir: newImp)
+            }
+            reconciled.npctRows = reconciled.npctRows.map { row in
+                let key = TpsMonitorRepository.normalizePibKey(row.noPib)
+                guard !key.isEmpty, let info = meta[key] else { return row }
+                let curTgl = TpsRowKit.cleanServerField(row.tglPib, fallback: "")
+                let curImp = TpsRowKit.cleanServerField(row.importir, fallback: "")
+                let newTgl = (curTgl.isEmpty || curTgl == "-") && !info.tglPib.isEmpty ? info.tglPib : row.tglPib
+                let newImp = (curImp.isEmpty || curImp == "-") && !info.importir.isEmpty ? info.importir : row.importir
+                if newTgl == row.tglPib && newImp == row.importir { return row }
+                return row.with(tglPib: newTgl, importir: newImp)
+            }
+        }
+        return reconciled
+    }
+
+    func reconcileTpsSnapshotMyTasks() {
+        guard tpsSnapshot.hasAnyData else { return }
+        let updated = reconcileSnapshot(tpsSnapshot)
+        if updated != tpsSnapshot {
+            tpsSnapshot = updated
+            if updated.hasAnyData && !updated.isLoading {
+                TpsMonitorCache.shared.saveInBackground(updated)
+            }
+        }
+    }
+
+    func applyLateNpctImporters(_ importersMap: [String: String]) {
+        guard !tpsSnapshot.npctRows.isEmpty, !importersMap.isEmpty else { return }
+        let pkbMeta = buildPibMetadataLookup()
+        let enriched = TpsMonitorRepository.shared.enrichNpctRows(
+            tpsSnapshot.npctRows,
+            importersMap: importersMap,
+            pkbMeta: pkbMeta
+        )
+        if enriched != tpsSnapshot.npctRows {
+            var next = tpsSnapshot
+            next.npctRows = enriched
+            tpsSnapshot = next
+            if next.hasAnyData && !next.isLoading {
+                TpsMonitorCache.shared.saveInBackground(next)
+            }
+        }
+    }
+
+    func refreshTpsMonitoring(force: Bool = false) async {
+        // Check TTL if non-forced refresh
+        if !force {
+            if let cached = TpsMonitorCache.shared.load(),
+               TpsMonitorCache.isExpired(timestampMillis: cached.timestampMillis) {
+                TpsMonitorCache.shared.clear()
+                tpsSnapshot = TpsMonitorSnapshot()
+                lastTpsFetchAt = .distantPast
+            } else if tpsSnapshot.hasAnyData && Date().timeIntervalSince(lastTpsFetchAt) < 120 {
+                reconcileTpsSnapshotMyTasks()
+                return
+            }
+        }
+
+        if tpsSnapshot.isLoading { return }
+
+        let previous = tpsSnapshot
+        tpsSnapshot.isLoading = true
+        tpsSnapshot.errorMessage = nil
+
+        let sets = buildMyTaskSets()
+        let fetched = await TpsMonitorRepository.shared.fetchFullSnapshot(
+            activeMyPibs: sets.pibs,
+            activeMyContainers: sets.containers
+        )
+
+        // Preserve previous rows for any terminal that transiently failed if we already have them
+        var merged = fetched
+        if merged.grahaRows.isEmpty && merged.failedSources.contains("Graha") && !previous.grahaRows.isEmpty {
+            merged.grahaRows = previous.grahaRows
+        }
+        if merged.npctRows.isEmpty && merged.failedSources.contains("NPCT") && !previous.npctRows.isEmpty {
+            merged.npctRows = previous.npctRows
+        }
+        if merged.tpslRows.isEmpty && merged.failedSources.contains("TPSL") && !previous.tpslRows.isEmpty {
+            merged.tpslRows = previous.tpslRows
+        }
+        if merged.errorMessage == nil && !merged.failedSources.isEmpty {
+            let activeTag: String
+            switch activeTpsSource {
+            case .graha: activeTag = "Graha"
+            case .npct: activeTag = "NPCT"
+            case .tpsl: activeTag = "TPSL"
+            }
+            let activeEmpty = (activeTpsSource == .graha && merged.grahaRows.isEmpty)
+                || (activeTpsSource == .npct && merged.npctRows.isEmpty)
+                || (activeTpsSource == .tpsl && merged.tpslRows.isEmpty)
+            if merged.failedSources.contains(activeTag) && activeEmpty {
+                merged.errorMessage = "Gagal memuat antrian \(activeTpsSource.rawValue). Ketuk Coba Lagi."
+            }
+        }
+
+        let finalSnap = reconcileSnapshot(merged)
+        tpsSnapshot = finalSnap
+        lastTpsFetchAt = Date()
+        if finalSnap.hasAnyData {
+            TpsMonitorCache.shared.saveInBackground(finalSnap)
         }
     }
 
@@ -4849,259 +5057,14 @@ struct BrowseSegmentPill: View {
     }
 }
 
-// MARK: - Tab 4: TPS Monitoring Hub (Matches TpsMonitoringScreensKt)
-
-struct TpsTabView: View {
-    @EnvironmentObject var app: AppState
-    let colors: SiapColors
-
-    @State private var source: TpsSource = .graha
-    @State private var items: [TpsMonitorItem] = []
-    @State private var isLoading = false
-    @State private var onlyMyTasks = false
-    @State private var searchText = ""
-    @State private var lampiranSheetItem: TpsMonitorItem?
-
-    private var myTaskCount: Int { items.filter(\.isMyTask).count }
-
-    private var filtered: [TpsMonitorItem] {
-        let q = searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        return items.filter { it in
-            if onlyMyTasks && !it.isMyTask { return false }
-            if q.isEmpty { return true }
-            return it.container.lowercased().contains(q)
-                || it.pib.lowercased().contains(q)
-                || it.importir.lowercased().contains(q)
-                || it.summary.lowercased().contains(q)
-        }
-    }
-
-    var body: some View {
-        VStack(spacing: 0) {
-            // Compact TPS Ribbon Bar (GRAHA | NPCT1 | TPSL)
-            HStack(spacing: 6) {
-                ForEach(TpsSource.allCases) { s in
-                    let active = source == s
-                    Button {
-                        source = s
-                    } label: {
-                        Text(s.rawValue)
-                            .font(.system(size: 12.5, weight: .heavy, design: .rounded))
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 8)
-                            .background(active ? colors.primaryAction : colors.surfaceElevated)
-                            .foregroundStyle(active ? colors.onPrimaryAction : colors.textSecondary)
-                            .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
-            .background(colors.surface)
-            .overlay(alignment: .bottom) {
-                Rectangle().fill(colors.divider).frame(height: 0.75)
-            }
-
-            ScrollView {
-                LazyVStack(spacing: 9) {
-                    // Search + Tugas Saya ★ + Refresh
-                    HStack(spacing: 7) {
-                        HStack(spacing: 6) {
-                            Image(systemName: "magnifyingglass").foregroundStyle(colors.textHint)
-                            TextField("Cari Kontainer / PIB...", text: $searchText)
-                                .font(.system(size: 13))
-                                .foregroundStyle(colors.textPrimary)
-                                .textInputAutocapitalization(.never)
-                                .autocorrectionDisabled()
-                        }
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 9)
-                        .background(colors.surface)
-                        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(colors.cardBorder, lineWidth: 1))
-                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-
-                        Button {
-                            onlyMyTasks.toggle()
-                        } label: {
-                            HStack(spacing: 4) {
-                                Image(systemName: onlyMyTasks ? "star.fill" : "star")
-                                Text("Tugas (\(myTaskCount))")
-                            }
-                            .font(.system(size: 11.5, weight: .bold))
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 9)
-                            .background(onlyMyTasks ? colors.myTaskBg : colors.surface)
-                            .foregroundStyle(onlyMyTasks ? colors.myTaskText : colors.textSecondary)
-                            .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(onlyMyTasks ? colors.myTaskBorder : colors.cardBorder, lineWidth: 1))
-                            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                        }
-                        .buttonStyle(.plain)
-
-                        Button {
-                            Task { await load() }
-                        } label: {
-                            Image(systemName: "arrow.clockwise")
-                                .font(.system(size: 14, weight: .bold))
-                                .foregroundStyle(colors.primaryAction)
-                                .padding(9)
-                                .background(colors.surface)
-                                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                        }
-                        .buttonStyle(.plain)
-                    }
-                    .padding(.horizontal, 12)
-                    .padding(.top, 10)
-
-                    HStack {
-                        Text("Tot: \(filtered.count) kontainer")
-                            .font(.system(size: 11.5, weight: .semibold))
-                            .foregroundStyle(colors.textHint)
-                        Spacer()
-                    }
-                    .padding(.horizontal, 14)
-
-                    if isLoading {
-                        ProgressView("Memuat \(source.rawValue)...").tint(colors.primaryAction).padding(.top, 36)
-                    } else if filtered.isEmpty {
-                        Text("Tidak ada data antrian di \(source.rawValue).")
-                            .font(.system(size: 13.5))
-                            .foregroundStyle(colors.textHint)
-                            .padding(.top, 36)
-                    } else {
-                        ForEach(filtered) { item in
-                            let browseTarget = !item.pib.isEmpty ? item.pib : (!item.importir.isEmpty ? item.importir : item.container)
-                            let browseLabel = !item.pib.isEmpty ? "Cari PIB \(item.pib) di Browse" : "Cari di Browse"
-
-                            VStack(alignment: .leading, spacing: 8) {
-                                Button {
-                                    app.openPibFromTps(noPib: item.pib, fallbackQuery: browseTarget)
-                                } label: {
-                                    VStack(alignment: .leading, spacing: 6) {
-                                        HStack {
-                                            if item.isMyTask {
-                                                Image(systemName: "star.fill")
-                                                    .font(.system(size: 12))
-                                                    .foregroundStyle(SiapColors.brandAmber)
-                                            }
-                                            Text(item.container)
-                                                .font(.system(size: 14.5, weight: .heavy, design: .monospaced))
-                                                .foregroundStyle(item.isMyTask ? colors.myTaskText : colors.textPrimary)
-                                            Spacer()
-                                            if !item.pib.isEmpty {
-                                                Text("PIB \(item.pib)")
-                                                    .font(.system(size: 11.5, weight: .bold, design: .monospaced))
-                                                    .padding(.horizontal, 7)
-                                                    .padding(.vertical, 3)
-                                                    .background(colors.primaryContainer)
-                                                    .foregroundStyle(colors.onPrimaryContainer)
-                                                    .clipShape(Capsule())
-                                            }
-                                        }
-
-                                        if !item.importir.isEmpty {
-                                            Text(item.importir)
-                                                .font(.system(size: 12.5, weight: .bold))
-                                                .foregroundStyle(colors.textPrimary)
-                                                .lineLimit(1)
-                                        }
-
-                                        Text(item.summary)
-                                            .font(.system(size: 11.5))
-                                            .foregroundStyle(colors.textSecondary)
-                                            .lineLimit(2)
-                                            .multilineTextAlignment(.leading)
-                                    }
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                                }
-                                .buttonStyle(.plain)
-
-                                Divider().overlay(colors.divider)
-
-                                // Action Row: Cari PIB di Browse + Lampiran PDF (Exact Android RowSearchButton + Quick Lampiran!)
-                                HStack(spacing: 8) {
-                                    Button {
-                                        app.searchPibInBrowse(query: browseTarget, fromTps: true)
-                                    } label: {
-                                        HStack(spacing: 5) {
-                                            Image(systemName: "doc.text.magnifyingglass")
-                                                .font(.system(size: 11.5, weight: .bold))
-                                            Text(browseLabel)
-                                                .font(.system(size: 11.5, weight: .bold))
-                                                .lineLimit(1)
-                                        }
-                                        .frame(maxWidth: .infinity)
-                                        .padding(.vertical, 8)
-                                        .padding(.horizontal, 9)
-                                        .background(colors.primaryContainer)
-                                        .foregroundStyle(colors.onPrimaryContainer)
-                                        .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
-                                    }
-                                    .buttonStyle(.plain)
-
-                                    if !item.pib.isEmpty || !item.importir.isEmpty {
-                                        Button {
-                                            lampiranSheetItem = item
-                                        } label: {
-                                            HStack(spacing: 4) {
-                                                Image(systemName: "paperclip")
-                                                    .font(.system(size: 11.5, weight: .bold))
-                                                Text("Lampiran")
-                                                    .font(.system(size: 11.5, weight: .bold))
-                                            }
-                                            .padding(.vertical, 8)
-                                            .padding(.horizontal, 11)
-                                            .background(colors.primaryAction)
-                                            .foregroundStyle(colors.onPrimaryAction)
-                                            .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
-                                        }
-                                        .buttonStyle(.plain)
-                                    }
-                                }
-                            }
-                            .padding(12)
-                            .background(item.isMyTask ? colors.myTaskBg : colors.surface)
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 13, style: .continuous)
-                                    .stroke(item.isMyTask ? colors.myTaskBorder : colors.cardBorder, lineWidth: item.isMyTask ? 1.4 : 1)
-                            )
-                            .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
-                            .padding(.horizontal, 12)
-                        }
-                    }
-                }
-                .padding(.bottom, 18)
-            }
-            .refreshable { await load() }
-        }
-        .onChange(of: source) { _ in Task { await load() } }
-        .task { await load() }
-        .sheet(item: $lampiranSheetItem) { item in
-            TpsDocumentLampiranSheet(item: item, colors: colors)
-                .environmentObject(app)
-                .preferredColorScheme(app.themeMode.preferredColorScheme)
-        }
-    }
-
-    private func load() async {
-        isLoading = true
-        defer { isLoading = false }
-        let myPibs = Set(app.pibs.map { String($0.noPib.drop(while: { $0 == "0" })) })
-        let myConts = Set(app.lorongItems.map { $0.noContainer.uppercased() })
-        do {
-            items = try await SiapApiClient.shared.fetchTps(source: source, myPibs: myPibs, myContainers: myConts)
-        } catch {
-            app.showToast("Gagal memuat \(source.rawValue): \(error.localizedDescription)")
-        }
-    }
-}
+// MARK: - Tab 4: TPS Monitoring Hub (Implemented in TpsMonitoringView.swift)
 
 // MARK: - In-Place Lampiran & Detail Sheet for Any TPS Monitoring Document
 
 struct TpsDocumentLampiranSheet: View {
     @EnvironmentObject var app: AppState
     @Environment(\.dismiss) private var dismiss
-    let item: TpsMonitorItem
+    let item: TpsLampiranTarget
     let colors: SiapColors
 
     @State private var isLoading = true
